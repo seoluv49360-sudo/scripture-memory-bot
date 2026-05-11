@@ -1,0 +1,9 @@
+services:
+  scripture-memory-bot:
+    build: .
+    container_name: scripture-memory-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./reminders.json:/app/reminders.json

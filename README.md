@@ -43,6 +43,43 @@ python bot.py
 
 텔레그램에서 만든 봇에게 `/start` 를 보내면 성구 선택 버튼이 표시됩니다.
 
+## Docker로 실행
+
+미니PC에서 Docker를 사용한다면 아래 방식이 가장 간단합니다.
+
+```bash
+git clone https://github.com/seoluv49360-sudo/scripture-memory-bot.git
+cd scripture-memory-bot
+cp .env.example .env
+```
+
+`.env` 파일에 BotFather 토큰을 넣습니다.
+
+```env
+TELEGRAM_BOT_TOKEN=발급받은_토큰
+```
+
+리마인더 저장 파일을 만들고 실행합니다.
+
+```bash
+touch reminders.json
+docker compose up -d --build
+```
+
+로그 확인:
+
+```bash
+docker compose logs -f
+```
+
+중지:
+
+```bash
+docker compose down
+```
+
+`restart: unless-stopped` 설정이 있어 미니PC가 재부팅되어도 Docker가 켜져 있으면 봇이 자동으로 다시 시작됩니다.
+
 ## 매일 리마인더
 
 봇 채팅방에서 아래 명령을 입력하면 매일 오전 8시마다 10개 성구 중 랜덤으로 1개가 전송됩니다.
