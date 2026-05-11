@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import time, timedelta, timezone
 from pathlib import Path
@@ -554,10 +555,11 @@ def main() -> None:
     if not token:
         raise RuntimeError(".env 파일에 TELEGRAM_BOT_TOKEN을 설정해 주세요.")
 
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    if sys.version_info >= (3, 14):
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
