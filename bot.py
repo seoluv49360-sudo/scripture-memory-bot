@@ -453,16 +453,23 @@ def is_blankable_word(word: str) -> bool:
     return not suffix and len(normalize(stem)) >= 2
 
 
-def phrase_start_for_complete_unit(words: list[str], index: int) -> int:
+def phrase_start_for_complete_unit(words: list[str], index: int, stem: str) -> int | None:
     start = index - 1
     if index >= 2 and words[index - 2].endswith("의"):
         start = index - 2
     while start < index and is_numeric_token(words[start]):
         start += 1
-    if start < index and is_phrase_prefix_stopword(words[start]):
-        return index
-    if start < index and normalize(words[start]).endswith(CLAUSE_ENDINGS):
-        return index
+    if start >= index:
+        return index if len(normalize(stem)) >= 2 else None
+    if is_phrase_prefix_stopword(words[start]):
+        return index if len(normalize(stem)) >= 2 else None
+    if normalize(words[start]).endswith(CLAUSE_ENDINGS):
+        return index if len(normalize(stem)) >= 2 else None
+    previous_stem, previous_suffix = split_particle(words[start])
+    if previous_suffix and not words[start].endswith("의"):
+        return index if len(normalize(stem)) >= 2 else None
+    if len(normalize(stem)) < 2 and not (index >= 2 and words[index - 2].endswith("의")):
+        return None
     return start
 
 
@@ -528,8 +535,8 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
             and not is_number_word(stem)
             and not is_phrase_stem_stopword(stem)
         ):
-            start = phrase_start_for_complete_unit(words, index)
-            if start == index and len(normalize(stem)) < 2:
+            start = phrase_start_for_complete_unit(words, index, stem)
+            if start is None:
                 continue
             answer_words = words[start:index] + [stem]
             candidates.append(
