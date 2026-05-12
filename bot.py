@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import html
 import json
 import os
 import random
@@ -51,6 +52,8 @@ class QuizState:
     answers: list[str]
     difficulty: str | None = None
     quiz_text: str = ""
+    quiz_words: list[str] = field(default_factory=list)
+    blank_indexes: list[int] = field(default_factory=list)
     options: list[str] = field(default_factory=list)
     selected_indexes: list[int] = field(default_factory=list)
 
@@ -61,8 +64,11 @@ def normalize(text: str) -> str:
 
 
 def remove_verse_numbers(text: str) -> str:
-    without_line_numbers = re.sub(r"(?m)^\s*\d{1,3}\s+", "", text)
-    return re.sub(r"(?<=\s)\d{1,3}\s+", "", without_line_numbers)
+    text = re.sub(r"(?m)^\s*\d{1,3}\s*절\s*", "", text)
+    text = re.sub(r"(?<=\s)\d{1,3}\s*절\s*", "", text)
+    text = re.sub(r"(?m)^\s*\d{1,3}\s*[.)]?\s*", "", text)
+    text = re.sub(r"(?<=\s)\d{1,3}\s*[.)]\s*", "", text)
+    return re.sub(r"(?<=\s)\d{1,3}\s+", "", text)
 
 
 def normalize_for_memory(text: str) -> str:
@@ -90,7 +96,13 @@ def short_reference(reference: str) -> str:
     return reference.replace("요한계시록", "계")
 
 
-def format_scripture_text(text: str) -> str:
+def is_single_verse(reference: str) -> bool:
+    return "-" not in reference and "~" not in reference
+
+
+def format_scripture_text(text: str, reference: str | None = None) -> str:
+    if reference and is_single_verse(reference):
+        text = re.sub(r"^\s*\d{1,3}\s+", "", text.strip())
     formatted = re.sub(r"\s+(\d{1,2})\s+", r"\n\1 ", text).strip()
     return formatted
 
@@ -175,7 +187,7 @@ async def send_daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         text=(
             "🌅 오늘의 암송 리마인더\n\n"
             f"📌 {scripture['reference']}\n\n"
-            f"{format_scripture_text(scripture['text'])}\n\n"
+            f"{format_scripture_text(scripture['text'], scripture['reference'])}\n\n"
             "✍️ 조용히 한 번 읽고, 눈을 감고 다시 떠올려 보세요."
         ),
     )
@@ -186,6 +198,15 @@ def mode_keyboard(scripture_id: str) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("✍️ 전체 암기 시작", callback_data=f"mode:{MODE_FULL}:{scripture_id}")],
             [InlineKeyboardButton("🧩 빈칸 넣기", callback_data=f"mode:{MODE_BLANK}:{scripture_id}")],
+            [InlineKeyboardButton("📖 다른 성구 선택", callback_data="menu")],
+        ]
+    )
+
+
+def practice_back_keyboard(scripture_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⬅️ 연습 방식 선택", callback_data=f"scripture:{scripture_id}")],
             [InlineKeyboardButton("📖 다른 성구 선택", callback_data="menu")],
         ]
     )
@@ -227,6 +248,15 @@ def blank_result_keyboard(scripture_id: str, difficulty: str) -> InlineKeyboardM
 
 
 def blank_choice_keyboard(quiz: QuizState) -> InlineKeyboardMarkup:
+    if len(quiz.selected_indexes) >= len(quiz.answers):
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ 채점하기", callback_data="blank_submit")],
+                [InlineKeyboardButton("↩️ 방금 선택 취소", callback_data="blank_undo")],
+                [InlineKeyboardButton("⬅️ 연습 방식 선택", callback_data=f"scripture:{quiz.scripture_id}")],
+            ]
+        )
+
     available_buttons = []
     selected = set(quiz.selected_indexes)
     for index, option in enumerate(quiz.options):
@@ -234,29 +264,53 @@ def blank_choice_keyboard(quiz: QuizState) -> InlineKeyboardMarkup:
             available_buttons.append(InlineKeyboardButton(f"🔹 {option}", callback_data=f"pick:{index}"))
 
     rows = [available_buttons[index : index + 2] for index in range(0, len(available_buttons), 2)]
+    if quiz.selected_indexes:
+        rows.append([InlineKeyboardButton("↩️ 방금 선택 취소", callback_data="blank_undo")])
     rows.append([InlineKeyboardButton("↩️ 선택 초기화", callback_data="blank_reset")])
+    rows.append([InlineKeyboardButton("⬅️ 연습 방식 선택", callback_data=f"scripture:{quiz.scripture_id}")])
     rows.append([InlineKeyboardButton("🎚️ 난이도 변경", callback_data=f"mode:{MODE_BLANK}:{quiz.scripture_id}")])
     return InlineKeyboardMarkup(rows)
 
 
+def blank_answer_for_slot(quiz: QuizState, slot_index: int) -> str | None:
+    if slot_index >= len(quiz.selected_indexes):
+        return None
+    return quiz.options[quiz.selected_indexes[slot_index]]
+
+
+def render_blank_text(quiz: QuizState) -> str:
+    blank_slots = {word_index: slot_index for slot_index, word_index in enumerate(quiz.blank_indexes)}
+    rendered_words = []
+    for word_index, word in enumerate(quiz.quiz_words):
+        if word_index not in blank_slots:
+            rendered_words.append(html.escape(word))
+            continue
+
+        slot_index = blank_slots[word_index]
+        selected_answer = blank_answer_for_slot(quiz, slot_index)
+        if selected_answer:
+            rendered_words.append(f"(<b><u>{html.escape(selected_answer)}</u></b>)")
+        else:
+            blank_number = slot_index + 1
+            rendered_words.append(f"({blank_number}) {'_' * 6}")
+    return " ".join(rendered_words)
+
+
 def blank_prompt_text(scripture: dict[str, str], quiz: QuizState) -> str:
     difficulty = DIFFICULTIES[quiz.difficulty or "easy"]
-    next_number = len(quiz.selected_indexes) + 1
     total = len(quiz.answers)
-    selected_answers = [quiz.options[index] for index in quiz.selected_indexes]
-    selected_text = "\n".join(
-        f"{index}. {answer}" for index, answer in enumerate(selected_answers, start=1)
-    )
-    if not selected_text:
-        selected_text = "아직 선택한 답이 없습니다."
+    if len(quiz.selected_indexes) >= total:
+        action_text = "✅ 모두 채웠습니다. 채점하기를 눌러 결과를 확인하세요."
+    else:
+        next_number = len(quiz.selected_indexes) + 1
+        action_text = f"👉 지금은 {next_number}번 빈칸 차례입니다."
 
     return (
         f"🧩 {scripture['reference']} 빈칸 넣기\n"
         f"🎚️ 난이도: {difficulty['label']} · {difficulty['hint']}\n\n"
-        f"{quiz.quiz_text}\n\n"
-        f"👉 지금은 {next_number}번 빈칸 차례입니다.\n"
-        f"📍 진행: {len(quiz.selected_indexes)}/{total}\n\n"
-        f"✅ 선택한 답:\n{selected_text}"
+        f"{render_blank_text(quiz)}\n\n"
+        f"{action_text}\n"
+        f"📍 진행: {len(quiz.selected_indexes)}/{total}"
     )
 
 
@@ -305,7 +359,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str]]:
+PARTICLE_SUFFIXES = ("으로부터", "로부터", "에게", "께서", "으로", "은", "는", "이", "가", "을", "를", "과", "와", "도", "만", "에", "로")
+
+
+def split_particle(word: str) -> tuple[str, str]:
+    for suffix in PARTICLE_SUFFIXES:
+        if word.endswith(suffix) and len(normalize(word[: -len(suffix)])) >= 1:
+            return word[: -len(suffix)], suffix
+    return word, ""
+
+
+def is_blankable_word(word: str) -> bool:
+    if normalize(word).isdigit():
+        return False
+    stem, suffix = split_particle(word)
+    return not suffix and len(normalize(stem)) >= 2
+
+
+def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[str], list[int]]:
     words = text.split()
     difficulty_info = DIFFICULTIES[difficulty]
     if len(words) < 4:
@@ -314,16 +385,57 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str]]:
         ratio_count = max(1, round(len(words) * difficulty_info["ratio"]))
         blank_count = min(ratio_count, difficulty_info["max_blanks"])
 
-    candidate_indexes = [index for index, word in enumerate(words) if len(normalize(word)) >= 2]
-    blank_indexes = sorted(random.sample(candidate_indexes, min(blank_count, len(candidate_indexes))))
+    candidates = []
+    for index, word in enumerate(words):
+        stem, suffix = split_particle(word)
+        if suffix and index > 0 and len(normalize(stem)) >= 2 and len(normalize(words[index - 1])) >= 2:
+            candidates.append(
+                {
+                    "start": index - 1,
+                    "end": index + 1,
+                    "answer": f"{words[index - 1]} {stem}",
+                    "suffix": suffix,
+                    "kind": "phrase",
+                }
+            )
+        elif is_blankable_word(word):
+            candidates.append(
+                {
+                    "start": index,
+                    "end": index + 1,
+                    "answer": word,
+                    "suffix": "",
+                    "kind": "word",
+                }
+            )
+
+    random.shuffle(candidates)
+    selected_units = []
+    used_indexes = set()
+    for candidate in candidates:
+        indexes = set(range(candidate["start"], candidate["end"]))
+        if indexes & used_indexes:
+            continue
+        selected_units.append(candidate)
+        used_indexes.update(indexes)
+        if len(selected_units) >= blank_count:
+            break
+
+    selected_units.sort(key=lambda candidate: candidate["start"])
 
     answers = []
     quiz_words = words[:]
-    for index in blank_indexes:
-        answers.append(words[index])
-        quiz_words[index] = f"({len(answers)}) {'_' * min(max(len(words[index]), 2), 8)}"
+    blank_indexes = []
+    for unit in selected_units:
+        answers.append(unit["answer"])
+        blank_indexes.append(unit["start"])
+        quiz_words[unit["start"]] = f"({len(answers)}) {'_' * 6}"
+        for index in range(unit["start"] + 1, unit["end"]):
+            quiz_words[index] = unit["suffix"] if index == unit["end"] - 1 else ""
 
-    return " ".join(quiz_words), answers
+    quiz_words = [word for word in quiz_words if word]
+
+    return " ".join(quiz_words), answers, quiz_words, blank_indexes
 
 
 def make_blank_options(answers: list[str]) -> list[str]:
@@ -417,7 +529,49 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(
             blank_prompt_text(scripture, quiz),
             reply_markup=blank_choice_keyboard(quiz),
+            parse_mode="HTML",
         )
+        return
+
+    if data == "blank_undo":
+        quiz = context.user_data.get("quiz")
+        if not quiz or quiz.mode != MODE_BLANK:
+            await query.edit_message_text(
+                "🧩 진행 중인 빈칸 문제가 없습니다.",
+                reply_markup=scripture_keyboard(query.message.chat_id),
+            )
+            return
+
+        if quiz.selected_indexes:
+            quiz.selected_indexes.pop()
+
+        scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
+        await query.edit_message_text(
+            blank_prompt_text(scripture, quiz),
+            reply_markup=blank_choice_keyboard(quiz),
+            parse_mode="HTML",
+        )
+        return
+
+    if data == "blank_submit":
+        quiz = context.user_data.get("quiz")
+        if not quiz or quiz.mode != MODE_BLANK:
+            await query.edit_message_text(
+                "🧩 진행 중인 빈칸 문제가 없습니다.",
+                reply_markup=scripture_keyboard(query.message.chat_id),
+            )
+            return
+
+        if len(quiz.selected_indexes) < len(quiz.answers):
+            scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
+            await query.edit_message_text(
+                blank_prompt_text(scripture, quiz),
+                reply_markup=blank_choice_keyboard(quiz),
+                parse_mode="HTML",
+            )
+            return
+
+        await finish_blank_quiz(update, context, quiz)
         return
 
     if data.startswith("pick:"):
@@ -433,14 +587,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if option_index not in quiz.selected_indexes:
             quiz.selected_indexes.append(option_index)
 
-        if len(quiz.selected_indexes) >= len(quiz.answers):
-            await finish_blank_quiz(update, context, quiz)
-            return
-
         scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
         await query.edit_message_text(
             blank_prompt_text(scripture, quiz),
             reply_markup=blank_choice_keyboard(quiz),
+            parse_mode="HTML",
         )
         return
 
@@ -461,7 +612,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         await query.edit_message_text(
             f"📌 {scripture['reference']}\n\n"
-            f"{format_scripture_text(scripture['text'])}\n\n"
+            f"{format_scripture_text(scripture['text'], scripture['reference'])}\n\n"
             "어떤 방식으로 연습할까요?",
             reply_markup=mode_keyboard(scripture_id),
         )
@@ -480,7 +631,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.edit_message_text(
                 f"✍️ {scripture['reference']} 전체 암기\n\n"
                 "성구 전체를 입력해 주세요.\n"
-                "띄어쓰기와 문장부호는 조금 달라도 괜찮습니다."
+                "띄어쓰기, 문장부호, 절 번호는 조금 달라도 괜찮습니다.",
+                reply_markup=practice_back_keyboard(scripture_id),
             )
             return
 
@@ -497,13 +649,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if data.startswith("blank:"):
         _, difficulty, scripture_id = data.split(":")
         scripture = SCRIPTURE_BY_ID[scripture_id]
-        quiz_text, answers = make_blank_quiz(scripture["text"], difficulty)
+        quiz_source = format_scripture_text(scripture["text"], scripture["reference"])
+        quiz_text, answers, quiz_words, blank_indexes = make_blank_quiz(quiz_source, difficulty)
         quiz = QuizState(
             scripture_id=scripture_id,
             mode=MODE_BLANK,
             answers=answers,
             difficulty=difficulty,
             quiz_text=quiz_text,
+            quiz_words=quiz_words,
+            blank_indexes=blank_indexes,
             options=make_blank_options(answers),
         )
         context.user_data["quiz"] = quiz
@@ -511,6 +666,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(
             blank_prompt_text(scripture, quiz),
             reply_markup=blank_choice_keyboard(quiz),
+            parse_mode="HTML",
         )
 
 
@@ -544,7 +700,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(
         f"{message}\n\n"
         f"📊 점수: {score}점\n\n"
-        f"📖 정답:\n{format_scripture_text(scripture['text'])}",
+        f"📖 정답:\n{format_scripture_text(scripture['text'], scripture['reference'])}",
         reply_markup=full_result_keyboard(quiz.scripture_id),
     )
 
