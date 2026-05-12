@@ -361,6 +361,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 PARTICLE_SUFFIXES = (
     "으로부터",
+    "께로부터",
     "로부터",
     "밖에는",
     "밖에",
@@ -406,9 +407,12 @@ STANDALONE_BLANK_STOPWORDS = {
     "저가",
     "또",
     "및",
+    "그이",
 }
 
-PHRASE_PREFIX_STOPWORDS = {"곧", "이는", "또", "및", "그", "저가"}
+PHRASE_PREFIX_STOPWORDS = {"곧", "이는", "또", "및", "그", "그이", "내", "나의", "네가", "저가"}
+PHRASE_STEM_STOPWORDS = {"그", "내", "나", "네", "저", "이"}
+CLAUSE_ENDINGS = ("라", "니", "며", "고", "되", "요")
 
 
 def is_standalone_stopword(word: str) -> bool:
@@ -417,6 +421,10 @@ def is_standalone_stopword(word: str) -> bool:
 
 def is_phrase_prefix_stopword(word: str) -> bool:
     return normalize(word) in PHRASE_PREFIX_STOPWORDS
+
+
+def is_phrase_stem_stopword(word: str) -> bool:
+    return normalize(word) in PHRASE_STEM_STOPWORDS
 
 
 def split_particle(word: str) -> tuple[str, str]:
@@ -451,7 +459,9 @@ def phrase_start_for_complete_unit(words: list[str], index: int) -> int:
         start = index - 2
     while start < index and is_numeric_token(words[start]):
         start += 1
-    if is_phrase_prefix_stopword(words[start]):
+    if start < index and is_phrase_prefix_stopword(words[start]):
+        return index
+    if start < index and normalize(words[start]).endswith(CLAUSE_ENDINGS):
         return index
     return start
 
@@ -510,7 +520,14 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
                     1,
                 )
             )
-        elif suffix and index > 0 and len(normalize(stem)) >= 1 and len(normalize(words[index - 1])) >= 1 and not is_number_word(stem):
+        elif (
+            suffix
+            and index > 0
+            and len(normalize(stem)) >= 1
+            and len(normalize(words[index - 1])) >= 1
+            and not is_number_word(stem)
+            and not is_phrase_stem_stopword(stem)
+        ):
             start = phrase_start_for_complete_unit(words, index)
             if start == index and len(normalize(stem)) < 2:
                 continue
