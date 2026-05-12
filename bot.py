@@ -396,6 +396,28 @@ NUMBER_WORDS = {
     "사천",
 }
 
+STANDALONE_BLANK_STOPWORDS = {
+    "곧",
+    "이는",
+    "나의",
+    "내",
+    "네가",
+    "그",
+    "저가",
+    "또",
+    "및",
+}
+
+PHRASE_PREFIX_STOPWORDS = {"곧", "이는", "또", "및", "그", "저가"}
+
+
+def is_standalone_stopword(word: str) -> bool:
+    return normalize(word) in STANDALONE_BLANK_STOPWORDS
+
+
+def is_phrase_prefix_stopword(word: str) -> bool:
+    return normalize(word) in PHRASE_PREFIX_STOPWORDS
+
 
 def split_particle(word: str) -> tuple[str, str]:
     for suffix in PARTICLE_SUFFIXES:
@@ -413,8 +435,38 @@ def is_number_word(word: str) -> bool:
 def is_blankable_word(word: str) -> bool:
     if normalize(word).isdigit():
         return False
+    if is_standalone_stopword(word):
+        return False
     stem, suffix = split_particle(word)
     return not suffix and len(normalize(stem)) >= 2
+
+
+def phrase_start_for_complete_unit(words: list[str], index: int) -> int:
+    start = index - 1
+    if index >= 2 and words[index - 2].endswith("의"):
+        start = index - 2
+    if is_phrase_prefix_stopword(words[start]):
+        return index
+    return start
+
+
+def make_candidate(
+    words: list[str],
+    start: int,
+    end: int,
+    answer_words: list[str],
+    suffix: str,
+    kind: str,
+    priority: int,
+) -> dict:
+    return {
+        "start": start,
+        "end": end,
+        "answer": " ".join(answer_words),
+        "suffix": suffix,
+        "kind": kind,
+        "priority": priority,
+    }
 
 
 def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[str], list[int]]:
@@ -437,36 +489,50 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
             and is_number_word(words[index - 1])
         ):
             candidates.append(
-                {
-                    "start": index - 2,
-                    "end": index + 1,
-                    "answer": f"{words[index - 2]} {words[index - 1]} {stem}",
-                    "suffix": suffix,
-                    "kind": "number_phrase",
-                }
+                make_candidate(
+                    words,
+                    index - 2,
+                    index + 1,
+                    [words[index - 2], words[index - 1], stem],
+                    suffix,
+                    "number_phrase",
+                    1,
+                )
             )
-        elif suffix and index > 0 and len(normalize(stem)) >= 2 and len(normalize(words[index - 1])) >= 2 and not is_number_word(stem):
+        elif suffix and index > 0 and len(normalize(stem)) >= 1 and len(normalize(words[index - 1])) >= 1 and not is_number_word(stem):
+            start = phrase_start_for_complete_unit(words, index)
+            if start == index and len(normalize(stem)) < 2:
+                continue
+            answer_words = words[start:index] + [stem]
             candidates.append(
-                {
-                    "start": index - 1,
-                    "end": index + 1,
-                    "answer": f"{words[index - 1]} {stem}",
-                    "suffix": suffix,
-                    "kind": "phrase",
-                }
+                make_candidate(
+                    words,
+                    start,
+                    index + 1,
+                    answer_words,
+                    suffix,
+                    "complete_phrase",
+                    1,
+                )
+            )
+            candidates.append(
+                make_candidate(
+                    words,
+                    start,
+                    index + 1,
+                    words[start : index + 1],
+                    "",
+                    "particle_phrase",
+                    3,
+                )
             )
         elif is_blankable_word(word):
             candidates.append(
-                {
-                    "start": index,
-                    "end": index + 1,
-                    "answer": word,
-                    "suffix": "",
-                    "kind": "word",
-                }
+                make_candidate(words, index, index + 1, [word], "", "word", 2)
             )
 
     random.shuffle(candidates)
+    candidates.sort(key=lambda candidate: candidate["priority"])
     selected_units = []
     used_indexes = set()
     for candidate in candidates:
@@ -487,6 +553,8 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
         answers.append(unit["answer"])
         blank_indexes.append(unit["start"])
         quiz_words[unit["start"]] = f"({len(answers)}) {'_' * 6}"
+        if unit["start"] == unit["end"] - 1 and unit["suffix"]:
+            quiz_words[unit["start"]] = f"{quiz_words[unit['start']]}{unit['suffix']}"
         for index in range(unit["start"] + 1, unit["end"]):
             quiz_words[index] = unit["suffix"] if index == unit["end"] - 1 else ""
 
