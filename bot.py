@@ -359,7 +359,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-PARTICLE_SUFFIXES = ("으로부터", "로부터", "에게", "께서", "으로", "은", "는", "이", "가", "을", "를", "과", "와", "도", "만", "에", "로")
+PARTICLE_SUFFIXES = ("으로부터", "로부터", "에게", "께서", "으로", "은", "는", "이", "가", "을", "를", "과", "와", "도", "에", "로")
 
 
 def split_particle(word: str) -> tuple[str, str]:
