@@ -293,7 +293,8 @@ def render_blank_text(quiz: QuizState) -> str:
         else:
             blank_number = slot_index + 1
             rendered_words.append(f"({blank_number}) {'_' * 6}")
-    return " ".join(rendered_words)
+    rendered_text = " ".join(rendered_words)
+    return re.sub(r"\s+(\d{1,2})\s+", r"\n\1 ", rendered_text).strip()
 
 
 def blank_prompt_text(scripture: dict[str, str], quiz: QuizState) -> str:
