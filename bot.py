@@ -432,8 +432,12 @@ def is_number_word(word: str) -> bool:
     return bool(korean_chars) and all(char in NUMBER_WORDS for char in korean_chars)
 
 
+def is_numeric_token(word: str) -> bool:
+    return bool(re.fullmatch(r"\d+[.)]?", normalize(word)))
+
+
 def is_blankable_word(word: str) -> bool:
-    if normalize(word).isdigit():
+    if is_numeric_token(word):
         return False
     if is_standalone_stopword(word):
         return False
@@ -445,6 +449,8 @@ def phrase_start_for_complete_unit(words: list[str], index: int) -> int:
     start = index - 1
     if index >= 2 and words[index - 2].endswith("의"):
         start = index - 2
+    while start < index and is_numeric_token(words[start]):
+        start += 1
     if is_phrase_prefix_stopword(words[start]):
         return index
     return start
@@ -459,14 +465,19 @@ def make_candidate(
     kind: str,
     priority: int,
 ) -> dict:
+    answer = " ".join(answer_words)
     return {
         "start": start,
         "end": end,
-        "answer": " ".join(answer_words),
+        "answer": answer,
         "suffix": suffix,
         "kind": kind,
         "priority": priority,
     }
+
+
+def has_numeric_token(text: str) -> bool:
+    return any(is_numeric_token(word) for word in text.split())
 
 
 def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[str], list[int]]:
@@ -536,6 +547,8 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
     selected_units = []
     used_indexes = set()
     for candidate in candidates:
+        if has_numeric_token(candidate["answer"]):
+            continue
         indexes = set(range(candidate["start"], candidate["end"]))
         if indexes & used_indexes:
             continue
