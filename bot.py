@@ -367,8 +367,6 @@ PARTICLE_SUFFIXES = (
     "에게",
     "께서",
     "으로",
-    "은",
-    "는",
     "이",
     "가",
     "을",
@@ -416,8 +414,6 @@ def is_blankable_word(word: str) -> bool:
     if normalize(word).isdigit():
         return False
     stem, suffix = split_particle(word)
-    if suffix in {"은", "는"} and len(normalize(word)) >= 2:
-        return True
     return not suffix and len(normalize(stem)) >= 2
 
 
