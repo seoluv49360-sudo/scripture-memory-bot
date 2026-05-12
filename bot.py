@@ -359,7 +359,44 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-PARTICLE_SUFFIXES = ("으로부터", "로부터", "에게", "께서", "으로", "은", "는", "이", "가", "을", "를", "과", "와", "도", "에", "로")
+PARTICLE_SUFFIXES = (
+    "으로부터",
+    "로부터",
+    "밖에는",
+    "밖에",
+    "에게",
+    "께서",
+    "으로",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "과",
+    "와",
+    "도",
+    "에",
+    "로",
+)
+
+NUMBER_WORDS = {
+    "일",
+    "이",
+    "삼",
+    "사",
+    "오",
+    "육",
+    "칠",
+    "팔",
+    "구",
+    "십",
+    "백",
+    "천",
+    "만",
+    "십사만",
+    "사천",
+}
 
 
 def split_particle(word: str) -> tuple[str, str]:
@@ -369,10 +406,18 @@ def split_particle(word: str) -> tuple[str, str]:
     return word, ""
 
 
+def is_number_word(word: str) -> bool:
+    normalized = normalize(word)
+    korean_chars = re.findall(r"[가-힣]", normalized)
+    return bool(korean_chars) and all(char in NUMBER_WORDS for char in korean_chars)
+
+
 def is_blankable_word(word: str) -> bool:
     if normalize(word).isdigit():
         return False
     stem, suffix = split_particle(word)
+    if suffix in {"은", "는"} and len(normalize(word)) >= 2:
+        return True
     return not suffix and len(normalize(stem)) >= 2
 
 
@@ -388,7 +433,23 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
     candidates = []
     for index, word in enumerate(words):
         stem, suffix = split_particle(word)
-        if suffix and index > 0 and len(normalize(stem)) >= 2 and len(normalize(words[index - 1])) >= 2:
+        if (
+            suffix in {"밖에는", "밖에"}
+            and index >= 2
+            and len(normalize(stem)) >= 1
+            and is_number_word(words[index - 2])
+            and is_number_word(words[index - 1])
+        ):
+            candidates.append(
+                {
+                    "start": index - 2,
+                    "end": index + 1,
+                    "answer": f"{words[index - 2]} {words[index - 1]} {stem}",
+                    "suffix": suffix,
+                    "kind": "number_phrase",
+                }
+            )
+        elif suffix and index > 0 and len(normalize(stem)) >= 2 and len(normalize(words[index - 1])) >= 2 and not is_number_word(stem):
             candidates.append(
                 {
                     "start": index - 1,
@@ -433,7 +494,17 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
         for index in range(unit["start"] + 1, unit["end"]):
             quiz_words[index] = unit["suffix"] if index == unit["end"] - 1 else ""
 
-    quiz_words = [word for word in quiz_words if word]
+    old_blank_indexes = blank_indexes
+    compacted_words = []
+    old_to_new_indexes = {}
+    for index, word in enumerate(quiz_words):
+        if not word:
+            continue
+        old_to_new_indexes[index] = len(compacted_words)
+        compacted_words.append(word)
+
+    quiz_words = compacted_words
+    blank_indexes = [old_to_new_indexes[index] for index in old_blank_indexes]
 
     return " ".join(quiz_words), answers, quiz_words, blank_indexes
 
