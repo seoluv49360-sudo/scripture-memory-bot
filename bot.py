@@ -594,9 +594,27 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
                     words,
                     index - 2,
                     index + 1,
-                    [words[index - 2], words[index - 1], stem],
-                    suffix,
+                    [words[index - 2], words[index - 1], words[index]],
+                    "",
                     "number_phrase",
+                    1,
+                )
+            )
+        elif (
+            word.endswith("같이")
+            and index > 0
+            and index + 1 < len(words)
+            and not is_numeric_token(words[index - 1])
+            and not is_phrase_prefix_stopword(words[index - 1])
+        ):
+            candidates.append(
+                make_candidate(
+                    words,
+                    index - 1,
+                    index + 2,
+                    [words[index - 1], word, words[index + 1]],
+                    "",
+                    "adverb_phrase",
                     1,
                 )
             )
@@ -611,27 +629,16 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
             start = phrase_start_for_complete_unit(words, index, stem)
             if start is None:
                 continue
-            answer_words = words[start:index] + [stem]
+            answer_words = words[start : index + 1]
             candidates.append(
                 make_candidate(
                     words,
                     start,
                     index + 1,
                     answer_words,
-                    suffix,
+                    "",
                     "complete_phrase",
                     1,
-                )
-            )
-            candidates.append(
-                make_candidate(
-                    words,
-                    start,
-                    index + 1,
-                    words[start : index + 1],
-                    "",
-                    "particle_phrase",
-                    3,
                 )
             )
         elif is_blankable_word(word):
