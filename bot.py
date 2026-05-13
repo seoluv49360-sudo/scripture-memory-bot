@@ -40,7 +40,7 @@ DIFFICULTIES = {
     "easy": {"label": "하", "ratio": 0.12, "max_blanks": 4, "hint": "가볍게 확인", "subjective": False},
     "medium": {"label": "중", "ratio": 0.2, "max_blanks": 7, "hint": "암송 점검", "subjective": False},
     "hard": {"label": "상", "ratio": 0.3, "max_blanks": 10, "hint": "실전 훈련", "subjective": False},
-    "expert": {"label": "최상", "ratio": 0.45, "max_blanks": 14, "hint": "주관식 도전", "subjective": True},
+    "expert": {"label": "최상", "ratio": 0.2, "max_blanks": 7, "hint": "주관식 도전", "subjective": True},
 }
 
 NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
