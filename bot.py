@@ -54,6 +54,7 @@ class QuizState:
     quiz_text: str = ""
     quiz_words: list[str] = field(default_factory=list)
     blank_indexes: list[int] = field(default_factory=list)
+    blank_suffixes: list[str] = field(default_factory=list)
     options: list[str] = field(default_factory=list)
     selected_indexes: list[int] = field(default_factory=list)
 
@@ -287,12 +288,13 @@ def render_blank_text(quiz: QuizState) -> str:
             continue
 
         slot_index = blank_slots[word_index]
+        suffix = quiz.blank_suffixes[slot_index] if slot_index < len(quiz.blank_suffixes) else ""
         selected_answer = blank_answer_for_slot(quiz, slot_index)
         if selected_answer:
-            rendered_words.append(f"(<b><u>{html.escape(selected_answer)}</u></b>)")
+            rendered_words.append(f"(<b><u>{html.escape(selected_answer)}</u></b>){html.escape(suffix)}")
         else:
             blank_number = slot_index + 1
-            rendered_words.append(f"({blank_number}) {'_' * 6}")
+            rendered_words.append(f"({blank_number}) {'_' * 6}{html.escape(suffix)}")
     rendered_text = " ".join(rendered_words)
     return re.sub(r"\s+(\d{1,2})\s+", r"\n\1 ", rendered_text).strip()
 
@@ -413,7 +415,7 @@ STANDALONE_BLANK_STOPWORDS = {
 
 PHRASE_PREFIX_STOPWORDS = {"곧", "이는", "또", "및", "그", "그이", "내", "나의", "네가", "저가"}
 PHRASE_STEM_STOPWORDS = {"그", "내", "나", "네", "저", "이"}
-CLAUSE_ENDINGS = ("라", "니", "며", "고", "되", "요")
+CLAUSE_ENDINGS = ("더라", "니라", "리라", "도다", "으매", "하니", "리니", "라", "니", "며", "매", "고", "되", "요")
 
 
 def is_standalone_stopword(word: str) -> bool:
@@ -456,7 +458,13 @@ def is_blankable_word(word: str) -> bool:
 
 def phrase_start_for_complete_unit(words: list[str], index: int, stem: str) -> int | None:
     start = index - 1
-    if index >= 2 and words[index - 2].endswith("의"):
+    previous_stem, previous_suffix = split_particle(words[index - 1])
+    if (
+        index >= 2
+        and words[index - 2].endswith("의")
+        and not previous_suffix
+        and not normalize(words[index - 1]).endswith(CLAUSE_ENDINGS)
+    ):
         start = index - 2
     while start < index and is_numeric_token(words[start]):
         start += 1
@@ -498,7 +506,7 @@ def has_numeric_token(text: str) -> bool:
     return any(is_numeric_token(word) for word in text.split())
 
 
-def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[str], list[int]]:
+def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[str], list[int], list[str]]:
     words = text.split()
     difficulty_info = DIFFICULTIES[difficulty]
     if len(words) < 4:
@@ -587,14 +595,14 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
     answers = []
     quiz_words = words[:]
     blank_indexes = []
+    blank_suffixes = []
     for unit in selected_units:
         answers.append(unit["answer"])
         blank_indexes.append(unit["start"])
+        blank_suffixes.append(unit["suffix"])
         quiz_words[unit["start"]] = f"({len(answers)}) {'_' * 6}"
-        if unit["start"] == unit["end"] - 1 and unit["suffix"]:
-            quiz_words[unit["start"]] = f"{quiz_words[unit['start']]}{unit['suffix']}"
         for index in range(unit["start"] + 1, unit["end"]):
-            quiz_words[index] = unit["suffix"] if index == unit["end"] - 1 else ""
+            quiz_words[index] = ""
 
     old_blank_indexes = blank_indexes
     compacted_words = []
@@ -608,7 +616,7 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
     quiz_words = compacted_words
     blank_indexes = [old_to_new_indexes[index] for index in old_blank_indexes]
 
-    return " ".join(quiz_words), answers, quiz_words, blank_indexes
+    return " ".join(quiz_words), answers, quiz_words, blank_indexes, blank_suffixes
 
 
 def make_blank_options(answers: list[str]) -> list[str]:
@@ -823,7 +831,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         _, difficulty, scripture_id = data.split(":")
         scripture = SCRIPTURE_BY_ID[scripture_id]
         quiz_source = format_scripture_text(scripture["text"], scripture["reference"])
-        quiz_text, answers, quiz_words, blank_indexes = make_blank_quiz(quiz_source, difficulty)
+        quiz_text, answers, quiz_words, blank_indexes, blank_suffixes = make_blank_quiz(quiz_source, difficulty)
         quiz = QuizState(
             scripture_id=scripture_id,
             mode=MODE_BLANK,
@@ -832,6 +840,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             quiz_text=quiz_text,
             quiz_words=quiz_words,
             blank_indexes=blank_indexes,
+            blank_suffixes=blank_suffixes,
             options=make_blank_options(answers),
         )
         context.user_data["quiz"] = quiz
