@@ -58,6 +58,7 @@ class QuizState:
     blank_suffixes: list[str] = field(default_factory=list)
     options: list[str] = field(default_factory=list)
     selected_indexes: list[int] = field(default_factory=list)
+    typed_answers: list[str] = field(default_factory=list)
 
 
 def normalize(text: str) -> str:
@@ -283,6 +284,16 @@ def blank_result_keyboard(scripture_id: str, difficulty: str) -> InlineKeyboardM
 
 
 def blank_choice_keyboard(quiz: QuizState) -> InlineKeyboardMarkup:
+    if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
+        rows = []
+        if len(quiz.typed_answers) >= len(quiz.answers):
+            rows.append([InlineKeyboardButton("✅ 채점하기", callback_data="blank_subjective_submit")])
+        if quiz.typed_answers:
+            rows.append([InlineKeyboardButton("↩️ 방금 입력 취소", callback_data="blank_subjective_undo")])
+        rows.append([InlineKeyboardButton("↩️ 입력 초기화", callback_data="blank_reset")])
+        rows.append([InlineKeyboardButton("⬅️ 연습 방식 선택", callback_data=f"scripture:{quiz.scripture_id}")])
+        return InlineKeyboardMarkup(rows)
+
     if len(quiz.selected_indexes) >= len(quiz.answers):
         return InlineKeyboardMarkup(
             [
@@ -308,6 +319,10 @@ def blank_choice_keyboard(quiz: QuizState) -> InlineKeyboardMarkup:
 
 
 def blank_answer_for_slot(quiz: QuizState, slot_index: int) -> str | None:
+    if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
+        if slot_index >= len(quiz.typed_answers):
+            return None
+        return quiz.typed_answers[slot_index]
     if slot_index >= len(quiz.selected_indexes):
         return None
     return quiz.options[quiz.selected_indexes[slot_index]]
@@ -337,13 +352,18 @@ def blank_prompt_text(scripture: dict[str, str], quiz: QuizState) -> str:
     difficulty = DIFFICULTIES[quiz.difficulty or "easy"]
     total = len(quiz.answers)
     if difficulty.get("subjective"):
+        filled_count = len(quiz.typed_answers)
+        if filled_count >= total:
+            action_text = "✅ 모두 채웠습니다. 채점하기를 눌러 결과를 확인하세요."
+        else:
+            action_text = f"✍️ {filled_count + 1}번 빈칸에 들어갈 답을 입력하고 엔터를 누르세요."
+
         return (
             f"🧩 {scripture['reference']} 빈칸 넣기\n"
             f"🎚️ 난이도: {difficulty['label']} · {difficulty['hint']}\n\n"
             f"{render_blank_text(quiz)}\n\n"
-            "✍️ 정답을 빈칸 순서대로 쉼표로 구분해 입력하세요.\n"
-            "예: 하나님의 말씀, 자기의 본 것, 증거\n"
-            f"📍 빈칸: {total}개"
+            f"{action_text}\n"
+            f"📍 진행: {filled_count}/{total}"
         )
 
     if len(quiz.selected_indexes) >= total:
@@ -684,12 +704,11 @@ def build_blank_result(quiz: QuizState) -> tuple[int, list[str]]:
     return correct_count, result_lines
 
 
-def build_subjective_blank_result(quiz: QuizState, submitted: str) -> tuple[int, list[str]]:
-    submitted_answers = [part.strip() for part in submitted.split(",") if part.strip()]
+def build_subjective_blank_result(quiz: QuizState) -> tuple[int, list[str]]:
     correct_count = 0
     result_lines = []
     for index, expected in enumerate(quiz.answers, start=1):
-        user_answer = submitted_answers[index - 1] if index - 1 < len(submitted_answers) else ""
+        user_answer = quiz.typed_answers[index - 1] if index - 1 < len(quiz.typed_answers) else ""
         _, is_exact = score_answer(expected, user_answer)
         if is_exact:
             correct_count += 1
@@ -771,9 +790,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
+            quiz.typed_answers.clear()
             await query.edit_message_text(
                 blank_prompt_text(SCRIPTURE_BY_ID[quiz.scripture_id], quiz),
-                reply_markup=practice_back_keyboard(quiz.scripture_id),
+                reply_markup=blank_choice_keyboard(quiz),
                 parse_mode="HTML",
             )
             return
@@ -784,6 +804,53 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             blank_prompt_text(scripture, quiz),
             reply_markup=blank_choice_keyboard(quiz),
             parse_mode="HTML",
+        )
+        return
+
+    if data == "blank_subjective_undo":
+        quiz = context.user_data.get("quiz")
+        if not quiz or quiz.mode != MODE_BLANK:
+            await query.edit_message_text(
+                "🧩 진행 중인 빈칸 문제가 없습니다.",
+                reply_markup=scripture_keyboard(query.message.chat_id),
+            )
+            return
+
+        if quiz.typed_answers:
+            quiz.typed_answers.pop()
+
+        scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
+        await query.edit_message_text(
+            blank_prompt_text(scripture, quiz),
+            reply_markup=blank_choice_keyboard(quiz),
+            parse_mode="HTML",
+        )
+        return
+
+    if data == "blank_subjective_submit":
+        quiz = context.user_data.get("quiz")
+        if not quiz or quiz.mode != MODE_BLANK:
+            await query.edit_message_text(
+                "🧩 진행 중인 빈칸 문제가 없습니다.",
+                reply_markup=scripture_keyboard(query.message.chat_id),
+            )
+            return
+
+        if len(quiz.typed_answers) < len(quiz.answers):
+            scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
+            await query.edit_message_text(
+                blank_prompt_text(scripture, quiz),
+                reply_markup=blank_choice_keyboard(quiz),
+                parse_mode="HTML",
+            )
+            return
+
+        correct_count, result_lines = build_subjective_blank_result(quiz)
+        total = len(quiz.answers)
+        context.user_data.pop("quiz", None)
+        await query.edit_message_text(
+            blank_result_message(correct_count, total, result_lines),
+            reply_markup=blank_result_keyboard(quiz.scripture_id, quiz.difficulty or "expert"),
         )
         return
 
@@ -922,7 +989,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if DIFFICULTIES[difficulty].get("subjective"):
             await query.edit_message_text(
                 blank_prompt_text(scripture, quiz),
-                reply_markup=practice_back_keyboard(scripture_id),
+                reply_markup=blank_choice_keyboard(quiz),
                 parse_mode="HTML",
             )
         else:
@@ -944,12 +1011,14 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if quiz.mode == MODE_BLANK:
         if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
-            correct_count, result_lines = build_subjective_blank_result(quiz, submitted)
-            total = len(quiz.answers)
-            context.user_data.pop("quiz", None)
+            if len(quiz.typed_answers) < len(quiz.answers):
+                quiz.typed_answers.append(submitted.strip())
+
+            scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
             await update.message.reply_text(
-                blank_result_message(correct_count, total, result_lines),
-                reply_markup=blank_result_keyboard(quiz.scripture_id, quiz.difficulty or "expert"),
+                blank_prompt_text(scripture, quiz),
+                reply_markup=blank_choice_keyboard(quiz),
+                parse_mode="HTML",
             )
             return
 
