@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -59,6 +60,7 @@ class QuizState:
     options: list[str] = field(default_factory=list)
     selected_indexes: list[int] = field(default_factory=list)
     typed_answers: list[str] = field(default_factory=list)
+    prompt_message_id: int | None = None
 
 
 def normalize(text: str) -> str:
@@ -990,6 +992,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             blank_indexes=blank_indexes,
             blank_suffixes=blank_suffixes,
             options=make_blank_options(answers),
+            prompt_message_id=query.message.message_id,
         )
         context.user_data["quiz"] = quiz
 
@@ -1022,11 +1025,29 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 quiz.typed_answers.append(submitted.strip())
 
             scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
-            await update.message.reply_text(
-                blank_prompt_text(scripture, quiz),
-                reply_markup=blank_choice_keyboard(quiz),
-                parse_mode="HTML",
-            )
+            if quiz.prompt_message_id:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=update.effective_chat.id,
+                        message_id=quiz.prompt_message_id,
+                        text=blank_prompt_text(scripture, quiz),
+                        reply_markup=blank_choice_keyboard(quiz),
+                        parse_mode="HTML",
+                    )
+                except TelegramError:
+                    sent_message = await update.message.reply_text(
+                        blank_prompt_text(scripture, quiz),
+                        reply_markup=blank_choice_keyboard(quiz),
+                        parse_mode="HTML",
+                    )
+                    quiz.prompt_message_id = sent_message.message_id
+            else:
+                sent_message = await update.message.reply_text(
+                    blank_prompt_text(scripture, quiz),
+                    reply_markup=blank_choice_keyboard(quiz),
+                    parse_mode="HTML",
+                )
+                quiz.prompt_message_id = sent_message.message_id
             return
 
         await update.message.reply_text(
