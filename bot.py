@@ -857,7 +857,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         correct_count, result_lines = build_subjective_blank_result(quiz)
         total = len(quiz.answers)
         context.user_data.pop("quiz", None)
-        await query.edit_message_text(
+        await query.message.reply_text(
             blank_result_message(correct_count, total, result_lines),
             reply_markup=blank_result_keyboard(quiz.scripture_id, quiz.difficulty or "expert"),
         )
