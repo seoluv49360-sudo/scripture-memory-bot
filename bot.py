@@ -79,6 +79,12 @@ def normalize_for_memory(text: str) -> str:
     return re.sub(r"[^A-Za-z가-힣]", "", compact).lower()
 
 
+def memory_tokens(text: str) -> list[str]:
+    without_numbers = remove_verse_numbers(text)
+    raw_tokens = re.findall(r"[A-Za-z가-힣]+", without_numbers)
+    return [token for token in raw_tokens if token]
+
+
 def score_answer(expected: str, submitted: str) -> tuple[int, bool]:
     expected_norm = normalize_for_memory(expected)
     submitted_norm = normalize_for_memory(submitted)
@@ -88,6 +94,32 @@ def score_answer(expected: str, submitted: str) -> tuple[int, bool]:
     ratio = difflib.SequenceMatcher(None, expected_norm, submitted_norm).ratio()
     score = round(ratio * 100)
     return score, expected_norm == submitted_norm
+
+
+def build_memory_diff(expected: str, submitted: str) -> str:
+    expected_tokens = memory_tokens(expected)
+    expected_norm = "".join(token.lower() for token in expected_tokens)
+    submitted_norm = normalize_for_memory(submitted)
+
+    bad_positions = set()
+    matcher = difflib.SequenceMatcher(None, expected_norm, submitted_norm)
+    for tag, expected_start, expected_end, _, _ in matcher.get_opcodes():
+        if tag != "equal":
+            bad_positions.update(range(expected_start, expected_end))
+
+    cursor = 0
+    marked_tokens = []
+    for token in expected_tokens:
+        token_length = len(token)
+        token_positions = set(range(cursor, cursor + token_length))
+        escaped = html.escape(token)
+        if token_positions & bad_positions:
+            marked_tokens.append(f"<b><u>{escaped}</u></b>")
+        else:
+            marked_tokens.append(escaped)
+        cursor += token_length
+
+    return " ".join(marked_tokens)
 
 
 def has_scripture_text(scripture: dict[str, str]) -> bool:
@@ -938,11 +970,14 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         message = "🌱 아직 차이가 큽니다. 짧게 끊어서 다시 외워 보세요."
 
     context.user_data.pop("quiz", None)
+    memory_diff = build_memory_diff(scripture["text"], submitted)
     await update.message.reply_text(
         f"{message}\n\n"
         f"📊 점수: {score}점\n\n"
-        f"📖 정답:\n{format_scripture_text(scripture['text'], scripture['reference'])}",
+        f"🔎 틀린 부분 표시:\n{memory_diff}\n\n"
+        f"📖 정답:\n{html.escape(format_scripture_text(scripture['text'], scripture['reference']))}",
         reply_markup=full_result_keyboard(quiz.scripture_id),
+        parse_mode="HTML",
     )
 
 
