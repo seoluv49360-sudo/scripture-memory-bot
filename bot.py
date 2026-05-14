@@ -48,6 +48,8 @@ DIFFICULTIES = {
     "expert": {"label": "최상", "ratio": 0.2, "max_blanks": 7, "hint": "주관식 도전", "subjective": True},
 }
 
+SUBJECTIVE_MIN_GAP_WORDS = 2
+
 NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
 
@@ -826,12 +828,21 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
     candidates.sort(key=lambda candidate: candidate["priority"])
     selected_units = []
     used_indexes = set()
+    subjective_mode = bool(difficulty_info.get("subjective"))
     for candidate in candidates:
         if has_numeric_token(candidate["answer"]):
             continue
         indexes = set(range(candidate["start"], candidate["end"]))
         if indexes & used_indexes:
             continue
+        if subjective_mode:
+            touches_existing_blank = any(
+                candidate["start"] <= unit["end"] + SUBJECTIVE_MIN_GAP_WORDS
+                and unit["start"] <= candidate["end"] + SUBJECTIVE_MIN_GAP_WORDS
+                for unit in selected_units
+            )
+            if touches_existing_blank:
+                continue
         selected_units.append(candidate)
         used_indexes.update(indexes)
         if len(selected_units) >= blank_count:
