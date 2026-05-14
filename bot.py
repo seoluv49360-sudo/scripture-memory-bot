@@ -229,7 +229,9 @@ def is_ignorable_telegram_error(error: BaseException) -> bool:
 
 
 def database_counts() -> dict[str, int]:
-    today = datetime.now(KST).date().isoformat()
+    today_date = datetime.now(KST).date()
+    today = today_date.isoformat()
+    yesterday = (today_date - timedelta(days=1)).isoformat()
     with DB_LOCK, db_connect() as connection:
         reminders = connection.execute("SELECT COUNT(*) FROM reminder_chats").fetchone()[0]
         quizzes = connection.execute("SELECT COUNT(*) FROM quiz_states").fetchone()[0]
@@ -238,7 +240,17 @@ def database_counts() -> dict[str, int]:
             "SELECT COUNT(*) FROM daily_visitors WHERE visit_date = ?",
             (today,),
         ).fetchone()[0]
-    return {"reminders": reminders, "quizzes": quizzes, "errors": errors, "today_visitors": today_visitors}
+        yesterday_visitors = connection.execute(
+            "SELECT COUNT(*) FROM daily_visitors WHERE visit_date = ?",
+            (yesterday,),
+        ).fetchone()[0]
+    return {
+        "reminders": reminders,
+        "quizzes": quizzes,
+        "errors": errors,
+        "today_visitors": today_visitors,
+        "yesterday_visitors": yesterday_visitors,
+    }
 
 
 def record_visit(update: Update) -> None:
@@ -620,6 +632,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(
         "📊 봇 상태\n\n"
         f"👥 오늘 방문자: {counts['today_visitors']}명\n"
+        f"👤 어제 방문자: {counts['yesterday_visitors']}명\n"
         f"🔔 리마인더 등록 채팅: {counts['reminders']}개\n"
         f"🧩 진행 중인 퀴즈 상태: {counts['quizzes']}개\n"
         f"⚠️ 기록된 에러: {counts['errors']}개\n"
