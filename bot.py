@@ -608,7 +608,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_visit(update)
     clear_quiz(update, context)
     context.user_data.clear()
-    await update.message.reply_text(
+    if not update.effective_message:
+        return
+    await update.effective_message.reply_text(
         "📖 암송할 성구를 선택하세요.\n\n원하는 구절을 누르면 연습 방식을 고를 수 있습니다.",
         reply_markup=scripture_keyboard(update.effective_chat.id),
     )
@@ -616,7 +618,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_visit(update)
-    await update.message.reply_text(
+    if not update.effective_message:
+        return
+    await update.effective_message.reply_text(
         "📖 /start - 성구 선택\n"
         "🔔 /remind_on - 매일 오전 8시 랜덤 성구 받기\n"
         "📊 /status - 봇 상태 확인\n"
@@ -628,8 +632,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_visit(update)
+    if not update.effective_message:
+        return
     counts = database_counts()
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "📊 봇 상태\n\n"
         f"👥 오늘 방문자: {counts['today_visitors']}명\n"
         f"👤 어제 방문자: {counts['yesterday_visitors']}명\n"
@@ -642,9 +648,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_visit(update)
+    if not update.effective_message or not update.effective_chat:
+        return
     chat_id = update.effective_chat.id
     if not schedule_daily_reminder(context.application, chat_id):
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "⚠️ 리마인더 예약 기능을 사용할 수 없습니다.\n\n"
             "아래 명령으로 패키지를 다시 설치한 뒤 봇을 재실행해 주세요.\n"
             ".\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt"
@@ -654,7 +662,7 @@ async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_ids = load_reminder_chats()
     chat_ids.add(chat_id)
     save_reminder_chats(chat_ids)
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "🔔 매일 오전 8시에 랜덤 암송 성구 1개를 보내드릴게요.",
         reply_markup=select_scripture_keyboard(),
     )
@@ -663,7 +671,9 @@ async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_visit(update)
     clear_quiz(update, context)
-    await update.message.reply_text(
+    if not update.effective_message:
+        return
+    await update.effective_message.reply_text(
         "🛑 현재 문제를 취소했습니다.\n\n다시 성구를 골라 주세요.",
         reply_markup=scripture_keyboard(update.effective_chat.id),
     )
@@ -1269,13 +1279,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_visit(update)
+    message = update.effective_message
+    if not message or not message.text:
+        return
     quiz = get_quiz(update, context)
     if not quiz:
-        await update.message.reply_text("📖 먼저 /start 로 성구를 선택해 주세요.")
+        await message.reply_text("📖 먼저 /start 로 성구를 선택해 주세요.")
         return
 
     scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
-    submitted = update.message.text
+    submitted = message.text
 
     if quiz.mode == MODE_BLANK:
         if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
@@ -1296,7 +1309,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 except TelegramError as error:
                     if is_ignorable_telegram_error(error):
                         return
-                    sent_message = await update.message.reply_text(
+                    sent_message = await message.reply_text(
                         blank_prompt_text(scripture, quiz),
                         reply_markup=blank_choice_keyboard(quiz),
                         parse_mode="HTML",
@@ -1304,7 +1317,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     quiz.prompt_message_id = sent_message.message_id
                     set_quiz(update, context, quiz)
             else:
-                sent_message = await update.message.reply_text(
+                sent_message = await message.reply_text(
                     blank_prompt_text(scripture, quiz),
                     reply_markup=blank_choice_keyboard(quiz),
                     parse_mode="HTML",
@@ -1313,7 +1326,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 set_quiz(update, context, quiz)
             return
 
-        await update.message.reply_text(
+        await message.reply_text(
             "🧩 빈칸 넣기는 아래 보기 버튼을 눌러 답을 선택해 주세요.",
             reply_markup=blank_choice_keyboard(quiz),
         )
@@ -1321,18 +1334,18 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     score, is_exact = score_answer(quiz.answers[0], submitted)
     if is_exact:
-        message = "🎉 정확합니다. 완벽하게 암송했어요."
+        feedback_text = "🎉 정확합니다. 완벽하게 암송했어요."
     elif score >= 85:
-        message = "👍 거의 다 맞았습니다. 몇 단어만 다시 확인해 보세요."
+        feedback_text = "👍 거의 다 맞았습니다. 몇 단어만 다시 확인해 보세요."
     elif score >= 60:
-        message = "🌊 흐름은 잡았어요. 원문을 한 번 더 읽고 다시 도전해 보세요."
+        feedback_text = "🌊 흐름은 잡았어요. 원문을 한 번 더 읽고 다시 도전해 보세요."
     else:
-        message = "🌱 아직 차이가 큽니다. 짧게 끊어서 다시 외워 보세요."
+        feedback_text = "🌱 아직 차이가 큽니다. 짧게 끊어서 다시 외워 보세요."
 
     clear_quiz(update, context)
     memory_diff = build_memory_diff(scripture["text"], submitted)
-    await update.message.reply_text(
-        f"{message}\n\n"
+    await message.reply_text(
+        f"{feedback_text}\n\n"
         f"📊 점수: {score}점\n\n"
         f"🔎 틀린 부분 표시:\n{memory_diff}\n\n"
         f"📖 정답:\n{html.escape(format_scripture_text(scripture['text'], scripture['reference']))}",
