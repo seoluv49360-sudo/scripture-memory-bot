@@ -5,8 +5,10 @@ import json
 import os
 import random
 import re
+import sqlite3
 import sys
-from dataclasses import dataclass, field
+import threading
+from dataclasses import asdict, dataclass, field
 from datetime import time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,6 +32,8 @@ MODE_FULL = "full"
 MODE_BLANK = "blank"
 SCRIPTURE_PLACEHOLDER = "개역한글 본문을 여기에 입력해 주세요."
 REMINDER_FILE = Path("reminders.json")
+DB_FILE = Path(os.getenv("BOT_DB_PATH", "data/bot.sqlite3"))
+DB_LOCK = threading.RLock()
 try:
     KST = ZoneInfo("Asia/Seoul")
 except Exception:
@@ -61,6 +65,157 @@ class QuizState:
     selected_indexes: list[int] = field(default_factory=list)
     typed_answers: list[str] = field(default_factory=list)
     prompt_message_id: int | None = None
+
+
+def db_connect() -> sqlite3.Connection:
+    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DB_FILE)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=5000")
+    return connection
+
+
+def init_database() -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminder_chats (
+                chat_id INTEGER PRIMARY KEY,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quiz_states (
+                user_id INTEGER PRIMARY KEY,
+                data TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                update_payload TEXT,
+                error TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+    migrate_reminders_json()
+
+
+def migrate_reminders_json() -> None:
+    if not REMINDER_FILE.exists():
+        return
+    try:
+        data = json.loads(REMINDER_FILE.read_text(encoding="utf-8"))
+        chat_ids = {int(chat_id) for chat_id in data.get("chat_ids", [])}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return
+    if not chat_ids:
+        return
+    save_reminder_chats(load_reminder_chats() | chat_ids)
+
+
+def quiz_to_json(quiz: QuizState) -> str:
+    return json.dumps(asdict(quiz), ensure_ascii=False)
+
+
+def quiz_from_json(data: str) -> QuizState | None:
+    try:
+        payload = json.loads(data)
+        return QuizState(**payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def state_user_id(update: Update) -> int:
+    if update.effective_user:
+        return update.effective_user.id
+    if update.effective_chat:
+        return update.effective_chat.id
+    return 0
+
+
+def save_quiz_state(user_id: int, quiz: QuizState) -> None:
+    if not user_id:
+        return
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO quiz_states (user_id, data, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                data = excluded.data,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (user_id, quiz_to_json(quiz)),
+        )
+        connection.commit()
+
+
+def load_quiz_state(user_id: int) -> QuizState | None:
+    if not user_id:
+        return None
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT data FROM quiz_states WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return quiz_from_json(row[0]) if row else None
+
+
+def clear_quiz_state(user_id: int) -> None:
+    if not user_id:
+        return
+    with DB_LOCK, db_connect() as connection:
+        connection.execute("DELETE FROM quiz_states WHERE user_id = ?", (user_id,))
+        connection.commit()
+
+
+def get_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> QuizState | None:
+    quiz = context.user_data.get("quiz")
+    if quiz:
+        return quiz
+    quiz = load_quiz_state(state_user_id(update))
+    if quiz:
+        context.user_data["quiz"] = quiz
+    return quiz
+
+
+def set_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz: QuizState) -> None:
+    context.user_data["quiz"] = quiz
+    save_quiz_state(state_user_id(update), quiz)
+
+
+def clear_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("quiz", None)
+    clear_quiz_state(state_user_id(update))
+
+
+def log_bot_error(update: object, error: BaseException) -> None:
+    try:
+        update_payload = update.to_json() if hasattr(update, "to_json") else str(update)
+    except Exception:
+        update_payload = "<unserializable update>"
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            "INSERT INTO bot_errors (update_payload, error) VALUES (?, ?)",
+            (update_payload, repr(error)),
+        )
+        connection.commit()
+
+
+def database_counts() -> dict[str, int]:
+    with DB_LOCK, db_connect() as connection:
+        reminders = connection.execute("SELECT COUNT(*) FROM reminder_chats").fetchone()[0]
+        quizzes = connection.execute("SELECT COUNT(*) FROM quiz_states").fetchone()[0]
+        errors = connection.execute("SELECT COUNT(*) FROM bot_errors").fetchone()[0]
+    return {"reminders": reminders, "quizzes": quizzes, "errors": errors}
 
 
 def normalize(text: str) -> str:
@@ -182,20 +337,19 @@ def reminder_start_keyboard() -> InlineKeyboardMarkup:
 
 
 def load_reminder_chats() -> set[int]:
-    if not REMINDER_FILE.exists():
-        return set()
-    try:
-        data = json.loads(REMINDER_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return set()
-    return {int(chat_id) for chat_id in data.get("chat_ids", [])}
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute("SELECT chat_id FROM reminder_chats").fetchall()
+    return {int(row[0]) for row in rows}
 
 
 def save_reminder_chats(chat_ids: set[int]) -> None:
-    REMINDER_FILE.write_text(
-        json.dumps({"chat_ids": sorted(chat_ids)}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    with DB_LOCK, db_connect() as connection:
+        connection.execute("DELETE FROM reminder_chats")
+        connection.executemany(
+            "INSERT OR IGNORE INTO reminder_chats (chat_id) VALUES (?)",
+            [(int(chat_id),) for chat_id in chat_ids],
+        )
+        connection.commit()
 
 
 def reminder_job_name(chat_id: int) -> str:
@@ -391,6 +545,7 @@ def blank_prompt_text(scripture: dict[str, str], quiz: QuizState) -> str:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_quiz(update, context)
     context.user_data.clear()
     await update.message.reply_text(
         "📖 암송할 성구를 선택하세요.\n\n원하는 구절을 누르면 연습 방식을 고를 수 있습니다.",
@@ -402,9 +557,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "📖 /start - 성구 선택\n"
         "🔔 /remind_on - 매일 오전 8시 랜덤 성구 받기\n"
+        "📊 /status - 봇 상태 확인\n"
         "🛑 /cancel - 현재 문제 취소\n\n"
         "✍️ 전체 암기는 입력한 문장을 원문과 비교해 점수를 보여 줍니다.\n"
         "🧩 빈칸 넣기는 보기 버튼을 빈칸 순서대로 누르면 자동으로 채점됩니다."
+    )
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    counts = database_counts()
+    await update.message.reply_text(
+        "📊 봇 상태\n\n"
+        f"🔔 리마인더 등록 채팅: {counts['reminders']}개\n"
+        f"🧩 진행 중인 퀴즈 상태: {counts['quizzes']}개\n"
+        f"⚠️ 기록된 에러: {counts['errors']}개\n"
+        "✅ 봇 프로세스가 응답 중입니다."
     )
 
 
@@ -428,7 +595,7 @@ async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop("quiz", None)
+    clear_quiz(update, context)
     await update.message.reply_text(
         "🛑 현재 문제를 취소했습니다.\n\n다시 성구를 골라 주세요.",
         reply_markup=scripture_keyboard(update.effective_chat.id),
@@ -754,7 +921,7 @@ async def finish_blank_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     query = update.callback_query
     correct_count, result_lines = build_blank_result(quiz)
     total = len(quiz.answers)
-    context.user_data.pop("quiz", None)
+    clear_quiz(update, context)
     await query.edit_message_text(
         blank_result_message(correct_count, total, result_lines),
         reply_markup=blank_result_keyboard(quiz.scripture_id, quiz.difficulty or "easy"),
@@ -767,7 +934,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     data = query.data
     if data == "menu":
-        context.user_data.pop("quiz", None)
+        clear_quiz(update, context)
         await query.edit_message_text(
             "📖 암송할 성구를 선택하세요.",
             reply_markup=scripture_keyboard(query.message.chat_id),
@@ -797,7 +964,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
     if data == "blank_reset":
-        quiz = context.user_data.get("quiz")
+        quiz = get_quiz(update, context)
         if not quiz or quiz.mode != MODE_BLANK:
             await query.edit_message_text(
                 "🧩 진행 중인 빈칸 문제가 없습니다.",
@@ -807,6 +974,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
             quiz.typed_answers.clear()
+            set_quiz(update, context, quiz)
             await query.edit_message_text(
                 blank_prompt_text(SCRIPTURE_BY_ID[quiz.scripture_id], quiz),
                 reply_markup=blank_choice_keyboard(quiz),
@@ -815,6 +983,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         quiz.selected_indexes.clear()
+        set_quiz(update, context, quiz)
         scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
         await query.edit_message_text(
             blank_prompt_text(scripture, quiz),
@@ -824,7 +993,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if data == "blank_subjective_undo":
-        quiz = context.user_data.get("quiz")
+        quiz = get_quiz(update, context)
         if not quiz or quiz.mode != MODE_BLANK:
             await query.edit_message_text(
                 "🧩 진행 중인 빈칸 문제가 없습니다.",
@@ -834,6 +1003,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if quiz.typed_answers:
             quiz.typed_answers.pop()
+            set_quiz(update, context, quiz)
 
         scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
         await query.edit_message_text(
@@ -844,7 +1014,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if data == "blank_subjective_submit":
-        quiz = context.user_data.get("quiz")
+        quiz = get_quiz(update, context)
         if not quiz or quiz.mode != MODE_BLANK:
             await query.edit_message_text(
                 "🧩 진행 중인 빈칸 문제가 없습니다.",
@@ -863,7 +1033,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         correct_count, result_lines = build_subjective_blank_result(quiz)
         total = len(quiz.answers)
-        context.user_data.pop("quiz", None)
+        clear_quiz(update, context)
         await query.message.reply_text(
             blank_result_message(correct_count, total, result_lines),
             reply_markup=blank_result_keyboard(quiz.scripture_id, quiz.difficulty or "expert"),
@@ -871,7 +1041,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if data == "blank_undo":
-        quiz = context.user_data.get("quiz")
+        quiz = get_quiz(update, context)
         if not quiz or quiz.mode != MODE_BLANK:
             await query.edit_message_text(
                 "🧩 진행 중인 빈칸 문제가 없습니다.",
@@ -881,6 +1051,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if quiz.selected_indexes:
             quiz.selected_indexes.pop()
+            set_quiz(update, context, quiz)
 
         scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
         await query.edit_message_text(
@@ -891,7 +1062,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if data == "blank_submit":
-        quiz = context.user_data.get("quiz")
+        quiz = get_quiz(update, context)
         if not quiz or quiz.mode != MODE_BLANK:
             await query.edit_message_text(
                 "🧩 진행 중인 빈칸 문제가 없습니다.",
@@ -912,7 +1083,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if data.startswith("pick:"):
-        quiz = context.user_data.get("quiz")
+        quiz = get_quiz(update, context)
         if not quiz or quiz.mode != MODE_BLANK:
             await query.edit_message_text(
                 "🧩 진행 중인 빈칸 문제가 없습니다.",
@@ -923,6 +1094,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         option_index = int(data.split(":", 1)[1])
         if option_index not in quiz.selected_indexes:
             quiz.selected_indexes.append(option_index)
+            set_quiz(update, context, quiz)
 
         scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
         await query.edit_message_text(
@@ -935,7 +1107,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if data.startswith("scripture:"):
         scripture_id = data.split(":", 1)[1]
         scripture = SCRIPTURE_BY_ID[scripture_id]
-        context.user_data.pop("quiz", None)
+        clear_quiz(update, context)
         if not has_scripture_text(scripture):
             await query.edit_message_text(
                 f"📌 {scripture['reference']}\n\n"
@@ -960,11 +1132,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         scripture = SCRIPTURE_BY_ID[scripture_id]
 
         if mode == MODE_FULL:
-            context.user_data["quiz"] = QuizState(
+            quiz = QuizState(
                 scripture_id=scripture_id,
                 mode=MODE_FULL,
                 answers=[scripture["text"]],
             )
+            set_quiz(update, context, quiz)
             await query.edit_message_text(
                 f"✍️ {scripture['reference']} 전체 암기\n\n"
                 "성구 전체를 입력해 주세요.\n"
@@ -1001,7 +1174,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             options=make_blank_options(answers),
             prompt_message_id=query.message.message_id,
         )
-        context.user_data["quiz"] = quiz
+        set_quiz(update, context, quiz)
 
         if DIFFICULTIES[difficulty].get("subjective"):
             await query.edit_message_text(
@@ -1018,7 +1191,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    quiz = context.user_data.get("quiz")
+    quiz = get_quiz(update, context)
     if not quiz:
         await update.message.reply_text("📖 먼저 /start 로 성구를 선택해 주세요.")
         return
@@ -1030,6 +1203,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
             if len(quiz.typed_answers) < len(quiz.answers):
                 quiz.typed_answers.append(submitted.strip())
+                set_quiz(update, context, quiz)
 
             scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
             if quiz.prompt_message_id:
@@ -1048,6 +1222,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         parse_mode="HTML",
                     )
                     quiz.prompt_message_id = sent_message.message_id
+                    set_quiz(update, context, quiz)
             else:
                 sent_message = await update.message.reply_text(
                     blank_prompt_text(scripture, quiz),
@@ -1055,6 +1230,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     parse_mode="HTML",
                 )
                 quiz.prompt_message_id = sent_message.message_id
+                set_quiz(update, context, quiz)
             return
 
         await update.message.reply_text(
@@ -1073,7 +1249,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         message = "🌱 아직 차이가 큽니다. 짧게 끊어서 다시 외워 보세요."
 
-    context.user_data.pop("quiz", None)
+    clear_quiz(update, context)
     memory_diff = build_memory_diff(scripture["text"], submitted)
     await update.message.reply_text(
         f"{message}\n\n"
@@ -1085,8 +1261,21 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.error:
+        log_bot_error(update, context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ 처리 중 문제가 발생했습니다. /start 로 다시 시작해 주세요."
+            )
+        except TelegramError:
+            pass
+
+
 def main() -> None:
     load_dotenv()
+    init_database()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError(".env 파일에 TELEGRAM_BOT_TOKEN을 설정해 주세요.")
@@ -1100,10 +1289,12 @@ def main() -> None:
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("remind_on", remind_on))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
+    app.add_error_handler(error_handler)
 
     schedule_saved_reminders(app)
     print("Bible memory bot is running...")

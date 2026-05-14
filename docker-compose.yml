@@ -6,4 +6,4 @@ services:
     env_file:
       - .env
     volumes:
-      - ./reminders.json:/app/reminders.json
+      - ./data:/app/data

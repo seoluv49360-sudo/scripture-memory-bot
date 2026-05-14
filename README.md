@@ -60,10 +60,10 @@ cp .env.example .env
 TELEGRAM_BOT_TOKEN=발급받은_토큰
 ```
 
-리마인더 저장 파일을 만들고 실행합니다.
+데이터 저장 폴더를 만들고 실행합니다.
 
 ```bash
-touch reminders.json
+mkdir data
 docker compose up -d --build
 ```
 
@@ -80,6 +80,14 @@ docker compose down
 ```
 
 `restart: unless-stopped` 설정이 있어 미니PC가 재부팅되어도 Docker가 켜져 있으면 봇이 자동으로 다시 시작됩니다.
+
+운영 상태 확인:
+
+```text
+/status
+```
+
+리마인더 등록 수, 진행 중인 퀴즈 상태 수, 기록된 에러 수를 확인할 수 있습니다. 리마인더와 진행 중인 퀴즈 상태는 `data/bot.sqlite3`에 저장됩니다.
 
 ## 매일 리마인더
 
