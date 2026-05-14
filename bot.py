@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -34,6 +34,8 @@ SCRIPTURE_PLACEHOLDER = "개역한글 본문을 여기에 입력해 주세요."
 REMINDER_FILE = Path("reminders.json")
 DB_FILE = Path(os.getenv("BOT_DB_PATH", "data/bot.sqlite3"))
 DB_LOCK = threading.RLock()
+QUIZ_STATE_TTL_DAYS = int(os.getenv("QUIZ_STATE_TTL_DAYS", "7"))
+ERROR_LOG_TTL_DAYS = int(os.getenv("ERROR_LOG_TTL_DAYS", "14"))
 try:
     KST = ZoneInfo("Asia/Seoul")
 except Exception:
@@ -222,6 +224,10 @@ def log_bot_error(update: object, error: BaseException) -> None:
         connection.commit()
 
 
+def is_ignorable_telegram_error(error: BaseException) -> bool:
+    return isinstance(error, BadRequest) and "Message is not modified" in str(error)
+
+
 def database_counts() -> dict[str, int]:
     today = datetime.now(KST).date().isoformat()
     with DB_LOCK, db_connect() as connection:
@@ -243,6 +249,19 @@ def record_visit(update: Update) -> None:
         connection.execute(
             "INSERT OR IGNORE INTO daily_visitors (visit_date, user_id) VALUES (?, ?)",
             (today, update.effective_user.id),
+        )
+        connection.commit()
+
+
+def cleanup_old_records() -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            "DELETE FROM quiz_states WHERE updated_at < datetime('now', ?)",
+            (f"-{QUIZ_STATE_TTL_DAYS} days",),
+        )
+        connection.execute(
+            "DELETE FROM bot_errors WHERE created_at < datetime('now', ?)",
+            (f"-{ERROR_LOG_TTL_DAYS} days",),
         )
         connection.commit()
 
@@ -1261,7 +1280,9 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         reply_markup=blank_choice_keyboard(quiz),
                         parse_mode="HTML",
                     )
-                except TelegramError:
+                except TelegramError as error:
+                    if is_ignorable_telegram_error(error):
+                        return
                     sent_message = await update.message.reply_text(
                         blank_prompt_text(scripture, quiz),
                         reply_markup=blank_choice_keyboard(quiz),
@@ -1309,6 +1330,8 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.error:
+        if is_ignorable_telegram_error(context.error):
+            return
         log_bot_error(update, context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
@@ -1342,6 +1365,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer))
     app.add_error_handler(error_handler)
 
+    cleanup_old_records()
     schedule_saved_reminders(app)
     print("Bible memory bot is running...")
     app.run_polling()
