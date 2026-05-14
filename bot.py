@@ -9,7 +9,7 @@ import sqlite3
 import sys
 import threading
 from dataclasses import asdict, dataclass, field
-from datetime import time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -103,6 +103,16 @@ def init_database() -> None:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 update_payload TEXT,
                 error TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_visitors (
+                visit_date TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (visit_date, user_id)
             )
             """
         )
@@ -213,11 +223,28 @@ def log_bot_error(update: object, error: BaseException) -> None:
 
 
 def database_counts() -> dict[str, int]:
+    today = datetime.now(KST).date().isoformat()
     with DB_LOCK, db_connect() as connection:
         reminders = connection.execute("SELECT COUNT(*) FROM reminder_chats").fetchone()[0]
         quizzes = connection.execute("SELECT COUNT(*) FROM quiz_states").fetchone()[0]
         errors = connection.execute("SELECT COUNT(*) FROM bot_errors").fetchone()[0]
-    return {"reminders": reminders, "quizzes": quizzes, "errors": errors}
+        today_visitors = connection.execute(
+            "SELECT COUNT(*) FROM daily_visitors WHERE visit_date = ?",
+            (today,),
+        ).fetchone()[0]
+    return {"reminders": reminders, "quizzes": quizzes, "errors": errors, "today_visitors": today_visitors}
+
+
+def record_visit(update: Update) -> None:
+    if not update.effective_user:
+        return
+    today = datetime.now(KST).date().isoformat()
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO daily_visitors (visit_date, user_id) VALUES (?, ?)",
+            (today, update.effective_user.id),
+        )
+        connection.commit()
 
 
 def normalize(text: str) -> str:
@@ -547,6 +574,7 @@ def blank_prompt_text(scripture: dict[str, str], quiz: QuizState) -> str:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
     clear_quiz(update, context)
     context.user_data.clear()
     await update.message.reply_text(
@@ -556,6 +584,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
     await update.message.reply_text(
         "📖 /start - 성구 선택\n"
         "🔔 /remind_on - 매일 오전 8시 랜덤 성구 받기\n"
@@ -567,9 +596,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
     counts = database_counts()
     await update.message.reply_text(
         "📊 봇 상태\n\n"
+        f"👥 오늘 방문자: {counts['today_visitors']}명\n"
         f"🔔 리마인더 등록 채팅: {counts['reminders']}개\n"
         f"🧩 진행 중인 퀴즈 상태: {counts['quizzes']}개\n"
         f"⚠️ 기록된 에러: {counts['errors']}개\n"
@@ -578,6 +609,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
     chat_id = update.effective_chat.id
     if not schedule_daily_reminder(context.application, chat_id):
         await update.message.reply_text(
@@ -597,6 +629,7 @@ async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
     clear_quiz(update, context)
     await update.message.reply_text(
         "🛑 현재 문제를 취소했습니다.\n\n다시 성구를 골라 주세요.",
@@ -940,6 +973,7 @@ async def finish_blank_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
     query = update.callback_query
     await query.answer()
 
@@ -1202,6 +1236,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
     quiz = get_quiz(update, context)
     if not quiz:
         await update.message.reply_text("📖 먼저 /start 로 성구를 선택해 주세요.")
