@@ -55,6 +55,10 @@ SUBJECTIVE_MIN_GAP_WORDS = 2
 NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
 
+def kst_now_text() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @dataclass
 class QuizState:
     scripture_id: str
@@ -158,16 +162,17 @@ def state_user_id(update: Update) -> int:
 def save_quiz_state(user_id: int, quiz: QuizState) -> None:
     if not user_id:
         return
+    now = kst_now_text()
     with DB_LOCK, db_connect() as connection:
         connection.execute(
             """
             INSERT INTO quiz_states (user_id, data, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 data = excluded.data,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = excluded.updated_at
             """,
-            (user_id, quiz_to_json(quiz)),
+            (user_id, quiz_to_json(quiz), now),
         )
         connection.commit()
 
@@ -218,8 +223,8 @@ def log_bot_error(update: object, error: BaseException) -> None:
         update_payload = "<unserializable update>"
     with DB_LOCK, db_connect() as connection:
         connection.execute(
-            "INSERT INTO bot_errors (update_payload, error) VALUES (?, ?)",
-            (update_payload, repr(error)),
+            "INSERT INTO bot_errors (created_at, update_payload, error) VALUES (?, ?, ?)",
+            (kst_now_text(), update_payload, repr(error)),
         )
         connection.commit()
 
@@ -259,21 +264,23 @@ def record_visit(update: Update) -> None:
     today = datetime.now(KST).date().isoformat()
     with DB_LOCK, db_connect() as connection:
         connection.execute(
-            "INSERT OR IGNORE INTO daily_visitors (visit_date, user_id) VALUES (?, ?)",
-            (today, update.effective_user.id),
+            "INSERT OR IGNORE INTO daily_visitors (visit_date, user_id, first_seen_at) VALUES (?, ?, ?)",
+            (today, update.effective_user.id, kst_now_text()),
         )
         connection.commit()
 
 
 def cleanup_old_records() -> None:
+    quiz_cutoff = (datetime.now(KST) - timedelta(days=QUIZ_STATE_TTL_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    error_cutoff = (datetime.now(KST) - timedelta(days=ERROR_LOG_TTL_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     with DB_LOCK, db_connect() as connection:
         connection.execute(
-            "DELETE FROM quiz_states WHERE updated_at < datetime('now', ?)",
-            (f"-{QUIZ_STATE_TTL_DAYS} days",),
+            "DELETE FROM quiz_states WHERE updated_at < ?",
+            (quiz_cutoff,),
         )
         connection.execute(
-            "DELETE FROM bot_errors WHERE created_at < datetime('now', ?)",
-            (f"-{ERROR_LOG_TTL_DAYS} days",),
+            "DELETE FROM bot_errors WHERE created_at < ?",
+            (error_cutoff,),
         )
         connection.commit()
 
@@ -403,11 +410,12 @@ def load_reminder_chats() -> set[int]:
 
 
 def save_reminder_chats(chat_ids: set[int]) -> None:
+    now = kst_now_text()
     with DB_LOCK, db_connect() as connection:
         connection.execute("DELETE FROM reminder_chats")
         connection.executemany(
-            "INSERT OR IGNORE INTO reminder_chats (chat_id) VALUES (?)",
-            [(int(chat_id),) for chat_id in chat_ids],
+            "INSERT OR IGNORE INTO reminder_chats (chat_id, created_at) VALUES (?, ?)",
+            [(int(chat_id), now) for chat_id in chat_ids],
         )
         connection.commit()
 
