@@ -175,6 +175,12 @@ def select_scripture_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def reminder_start_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📖 성구 암송하러 가기", callback_data="menu")]]
+    )
+
+
 def load_reminder_chats() -> set[int]:
     if not REMINDER_FILE.exists():
         return set()
@@ -227,6 +233,7 @@ async def send_daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
             f"{format_scripture_text(scripture['text'], scripture['reference'])}\n\n"
             "✍️ 조용히 한 번 읽고, 눈을 감고 다시 떠올려 보세요."
         ),
+        reply_markup=reminder_start_keyboard(),
     )
 
 
