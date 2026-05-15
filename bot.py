@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -230,6 +230,8 @@ def log_bot_error(update: object, error: BaseException) -> None:
 
 
 def is_ignorable_telegram_error(error: BaseException) -> bool:
+    if is_blocked_by_user_error(error):
+        return True
     if not isinstance(error, BadRequest):
         return False
     message = str(error)
@@ -238,6 +240,10 @@ def is_ignorable_telegram_error(error: BaseException) -> bool:
         or "Query is too old" in message
         or "query id is invalid" in message
     )
+
+
+def is_blocked_by_user_error(error: BaseException) -> bool:
+    return isinstance(error, Forbidden) and "bot was blocked by the user" in str(error)
 
 
 def database_counts() -> dict[str, int]:
@@ -427,6 +433,14 @@ def save_reminder_chats(chat_ids: set[int]) -> None:
         connection.commit()
 
 
+def remove_reminder_chat(chat_id: int | None) -> None:
+    if chat_id is None:
+        return
+    with DB_LOCK, db_connect() as connection:
+        connection.execute("DELETE FROM reminder_chats WHERE chat_id = ?", (int(chat_id),))
+        connection.commit()
+
+
 def reminder_job_name(chat_id: int) -> str:
     return f"daily_scripture_reminder:{chat_id}"
 
@@ -454,16 +468,23 @@ def schedule_saved_reminders(application: Application) -> None:
 
 async def send_daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     scripture = random.choice(SCRIPTURES)
-    await context.bot.send_message(
-        chat_id=context.job.chat_id,
-        text=(
-            "🌅 오늘의 암송 리마인더\n\n"
-            f"📌 {scripture['reference']}\n\n"
-            f"{format_scripture_text(scripture['text'], scripture['reference'])}\n\n"
-            "✍️ 조용히 한 번 읽고, 눈을 감고 다시 떠올려 보세요."
-        ),
-        reply_markup=reminder_start_keyboard(),
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=context.job.chat_id,
+            text=(
+                "🌅 오늘의 암송 리마인더\n\n"
+                f"📌 {scripture['reference']}\n\n"
+                f"{format_scripture_text(scripture['text'], scripture['reference'])}\n\n"
+                "✍️ 조용히 한 번 읽고, 눈을 감고 다시 떠올려 보세요."
+            ),
+            reply_markup=reminder_start_keyboard(),
+        )
+    except TelegramError as error:
+        if is_blocked_by_user_error(error):
+            remove_reminder_chat(context.job.chat_id)
+            context.job.schedule_removal()
+            return
+        raise
 
 
 def mode_keyboard(scripture_id: str) -> InlineKeyboardMarkup:
