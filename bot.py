@@ -230,7 +230,14 @@ def log_bot_error(update: object, error: BaseException) -> None:
 
 
 def is_ignorable_telegram_error(error: BaseException) -> bool:
-    return isinstance(error, BadRequest) and "Message is not modified" in str(error)
+    if not isinstance(error, BadRequest):
+        return False
+    message = str(error)
+    return (
+        "Message is not modified" in message
+        or "Query is too old" in message
+        or "query id is invalid" in message
+    )
 
 
 def database_counts() -> dict[str, int]:
@@ -1025,7 +1032,11 @@ async def finish_blank_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_visit(update)
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except TelegramError as error:
+        if not is_ignorable_telegram_error(error):
+            raise
 
     data = query.data
     if data == "menu":
