@@ -28,13 +28,15 @@ from telegram.ext import (
 from scriptures import SCRIPTURE_BY_ID, SCRIPTURES
 
 
+load_dotenv()
+
 MODE_FULL = "full"
 MODE_BLANK = "blank"
 SCRIPTURE_PLACEHOLDER = "개역한글 본문을 여기에 입력해 주세요."
 REMINDER_FILE = Path("reminders.json")
 DB_FILE = Path(os.getenv("BOT_DB_PATH", "data/bot.sqlite3"))
 DB_LOCK = threading.RLock()
-QUIZ_STATE_TTL_DAYS = int(os.getenv("QUIZ_STATE_TTL_DAYS", "7"))
+QUIZ_STATE_TTL_DAYS = int(os.getenv("QUIZ_STATE_TTL_DAYS", "3"))
 ERROR_LOG_TTL_DAYS = int(os.getenv("ERROR_LOG_TTL_DAYS", "14"))
 try:
     KST = ZoneInfo("Asia/Seoul")
@@ -57,6 +59,19 @@ NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣
 
 def kst_now_text() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def configured_admin_ids() -> set[int]:
+    raw_ids = os.getenv("ADMIN_USER_IDS", "")
+    admin_ids: set[int] = set()
+    for raw_id in re.split(r"[,;\s]+", raw_ids.strip()):
+        if not raw_id:
+            continue
+        try:
+            admin_ids.add(int(raw_id))
+        except ValueError:
+            continue
+    return admin_ids
 
 
 @dataclass
@@ -229,8 +244,25 @@ def log_bot_error(update: object, error: BaseException) -> None:
         connection.commit()
 
 
+def recent_bot_errors(limit: int = 5) -> list[tuple[str, str]]:
+    with DB_LOCK, db_connect() as connection:
+        rows = connection.execute(
+            "SELECT created_at, error FROM bot_errors ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [(str(row[0]), str(row[1])) for row in rows]
+
+
+def reset_bot_errors() -> int:
+    with DB_LOCK, db_connect() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM bot_errors").fetchone()[0]
+        connection.execute("DELETE FROM bot_errors")
+        connection.commit()
+    return int(count)
+
+
 def is_ignorable_telegram_error(error: BaseException) -> bool:
-    if is_blocked_by_user_error(error):
+    if is_unreachable_chat_error(error):
         return True
     if not isinstance(error, BadRequest):
         return False
@@ -242,14 +274,27 @@ def is_ignorable_telegram_error(error: BaseException) -> bool:
     )
 
 
-def is_blocked_by_user_error(error: BaseException) -> bool:
-    return isinstance(error, Forbidden) and "bot was blocked by the user" in str(error)
+def is_unreachable_chat_error(error: BaseException) -> bool:
+    message = str(error).lower()
+    if isinstance(error, Forbidden):
+        return any(
+            phrase in message
+            for phrase in (
+                "bot was blocked by the user",
+                "bot was kicked",
+                "user is deactivated",
+            )
+        )
+    if isinstance(error, BadRequest):
+        return "chat not found" in message
+    return False
 
 
 def database_counts() -> dict[str, int]:
     today_date = datetime.now(KST).date()
     today = today_date.isoformat()
     yesterday = (today_date - timedelta(days=1)).isoformat()
+    week_start = (today_date - timedelta(days=6)).isoformat()
     with DB_LOCK, db_connect() as connection:
         reminders = connection.execute("SELECT COUNT(*) FROM reminder_chats").fetchone()[0]
         quizzes = connection.execute("SELECT COUNT(*) FROM quiz_states").fetchone()[0]
@@ -262,12 +307,36 @@ def database_counts() -> dict[str, int]:
             "SELECT COUNT(*) FROM daily_visitors WHERE visit_date = ?",
             (yesterday,),
         ).fetchone()[0]
+        week_visitors = connection.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM daily_visitors WHERE visit_date BETWEEN ? AND ?",
+            (week_start, today),
+        ).fetchone()[0]
+        total_visitors = connection.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM daily_visitors",
+        ).fetchone()[0]
+        today_new_visitors = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM daily_visitors AS today_visits
+            WHERE today_visits.visit_date = ?
+              AND NOT EXISTS (
+                SELECT 1
+                FROM daily_visitors AS past_visits
+                WHERE past_visits.user_id = today_visits.user_id
+                  AND past_visits.visit_date < ?
+              )
+            """,
+            (today, today),
+        ).fetchone()[0]
     return {
         "reminders": reminders,
         "quizzes": quizzes,
         "errors": errors,
         "today_visitors": today_visitors,
         "yesterday_visitors": yesterday_visitors,
+        "week_visitors": week_visitors,
+        "total_visitors": total_visitors,
+        "today_new_visitors": today_new_visitors,
     }
 
 
@@ -480,7 +549,7 @@ async def send_daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=reminder_start_keyboard(),
         )
     except TelegramError as error:
-        if is_blocked_by_user_error(error):
+        if is_unreachable_chat_error(error):
             remove_reminder_chat(context.job.chat_id)
             context.job.schedule_removal()
             return
@@ -675,11 +744,78 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "📊 봇 상태\n\n"
         f"👥 오늘 방문자: {counts['today_visitors']}명\n"
         f"👤 어제 방문자: {counts['yesterday_visitors']}명\n"
+        f"🆕 오늘 신규 방문자: {counts['today_new_visitors']}명\n"
+        f"📆 최근 7일 방문자: {counts['week_visitors']}명\n"
+        f"🌐 누적 방문자: {counts['total_visitors']}명\n"
         f"🔔 리마인더 등록 채팅: {counts['reminders']}개\n"
         f"🧩 진행 중인 퀴즈 상태: {counts['quizzes']}개\n"
         f"⚠️ 기록된 에러: {counts['errors']}개\n"
         "✅ 봇 프로세스가 응답 중입니다."
     )
+
+
+async def require_admin(update: Update) -> bool:
+    message = update.effective_message
+    if not message:
+        return False
+
+    admin_ids = configured_admin_ids()
+    if not admin_ids:
+        await message.reply_text(
+            "⚠️ 관리자 ID가 설정되어 있지 않습니다.\n\n"
+            ".env 파일에 ADMIN_USER_IDS=내텔레그램ID 형식으로 입력해 주세요."
+        )
+        return False
+
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id not in admin_ids:
+        await message.reply_text("🔒 관리자만 사용할 수 있는 명령어입니다.")
+        return False
+
+    return True
+
+
+async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
+    if not await require_admin(update):
+        return
+    counts = database_counts()
+    await update.effective_message.reply_text(
+        "🛠 관리자 상태\n\n"
+        f"👥 오늘 방문자: {counts['today_visitors']}명\n"
+        f"👤 어제 방문자: {counts['yesterday_visitors']}명\n"
+        f"🆕 오늘 신규 방문자: {counts['today_new_visitors']}명\n"
+        f"📆 최근 7일 방문자: {counts['week_visitors']}명\n"
+        f"🌐 누적 방문자: {counts['total_visitors']}명\n"
+        f"🔔 리마인더 등록 채팅: {counts['reminders']}개\n"
+        f"🧩 진행 중인 퀴즈 상태: {counts['quizzes']}개\n"
+        f"⚠️ 기록된 에러: {counts['errors']}개\n"
+        f"🧹 퀴즈 상태 보관: {QUIZ_STATE_TTL_DAYS}일\n"
+        f"🧹 에러 로그 보관: {ERROR_LOG_TTL_DAYS}일"
+    )
+
+
+async def admin_errors_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
+    if not await require_admin(update):
+        return
+    rows = recent_bot_errors(limit=5)
+    if not rows:
+        await update.effective_message.reply_text("✅ 기록된 에러가 없습니다.")
+        return
+
+    lines = ["⚠️ 최근 에러 5개"]
+    for created_at, error in rows:
+        lines.append(f"\n🕒 {html.escape(created_at)}\n<code>{html.escape(error[:800])}</code>")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def admin_reset_errors_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
+    if not await require_admin(update):
+        return
+    count = reset_bot_errors()
+    await update.effective_message.reply_text(f"🧹 기록된 에러 {count}개를 리셋했습니다.")
 
 
 async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1409,7 +1545,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def main() -> None:
-    load_dotenv()
     init_database()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -1425,6 +1560,9 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("admin_status", admin_status_command))
+    app.add_handler(CommandHandler("admin_errors", admin_errors_command))
+    app.add_handler(CommandHandler("admin_reset_errors", admin_reset_errors_command))
     app.add_handler(CommandHandler("remind_on", remind_on))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CallbackQueryHandler(handle_button))

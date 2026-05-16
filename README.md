@@ -34,6 +34,9 @@ copy .env.example .env
 
 ```env
 TELEGRAM_BOT_TOKEN=발급받은_토큰
+ADMIN_USER_IDS=관리자_텔레그램_ID
+QUIZ_STATE_TTL_DAYS=3
+ERROR_LOG_TTL_DAYS=14
 ```
 
 ## 실행
@@ -58,6 +61,9 @@ cp .env.example .env
 
 ```env
 TELEGRAM_BOT_TOKEN=발급받은_토큰
+ADMIN_USER_IDS=관리자_텔레그램_ID
+QUIZ_STATE_TTL_DAYS=3
+ERROR_LOG_TTL_DAYS=14
 ```
 
 데이터 저장 폴더를 만들고 실행합니다.
@@ -87,7 +93,22 @@ docker compose down
 /status
 ```
 
-오늘 방문자 수, 리마인더 등록 수, 진행 중인 퀴즈 상태 수, 기록된 에러 수를 확인할 수 있습니다. 방문자는 하루 기준 사용자 ID 중복을 제외해 계산합니다. 리마인더와 진행 중인 퀴즈 상태는 `data/bot.sqlite3`에 저장됩니다.
+오늘/어제/최근 7일/누적 방문자 수, 오늘 신규 방문자 수, 리마인더 등록 수, 진행 중인 퀴즈 상태 수, 기록된 에러 수를 확인할 수 있습니다. 방문자는 하루 기준 사용자 ID 중복을 제외해 계산합니다. 리마인더와 진행 중인 퀴즈 상태는 `data/bot.sqlite3`에 저장됩니다.
+
+관리자 명령어:
+
+```text
+/admin_status
+/admin_errors
+/admin_reset_errors
+```
+
+관리자 명령어는 `.env`의 `ADMIN_USER_IDS`에 등록된 텔레그램 사용자 ID만 사용할 수 있습니다. 여러 명을 등록하려면 쉼표로 구분합니다.
+
+운영 데이터 보관 기간:
+
+- `QUIZ_STATE_TTL_DAYS`: 진행 중인 퀴즈 상태 보관 일수, 기본 3일
+- `ERROR_LOG_TTL_DAYS`: 에러 로그 보관 일수, 기본 14일
 
 ## 매일 리마인더
 
