@@ -37,6 +37,7 @@ TELEGRAM_BOT_TOKEN=발급받은_토큰
 ADMIN_USER_IDS=관리자_텔레그램_ID
 QUIZ_STATE_TTL_DAYS=3
 ERROR_LOG_TTL_DAYS=14
+TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS=600
 ```
 
 ## 실행
@@ -64,6 +65,7 @@ TELEGRAM_BOT_TOKEN=발급받은_토큰
 ADMIN_USER_IDS=관리자_텔레그램_ID
 QUIZ_STATE_TTL_DAYS=3
 ERROR_LOG_TTL_DAYS=14
+TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS=600
 ```
 
 데이터 저장 폴더를 만들고 실행합니다.
@@ -109,6 +111,7 @@ docker compose down
 
 - `QUIZ_STATE_TTL_DAYS`: 진행 중인 퀴즈 상태 보관 일수, 기본 3일
 - `ERROR_LOG_TTL_DAYS`: 에러 로그 보관 일수, 기본 14일
+- `TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS`: 일시적 네트워크 에러 기록 최소 간격, 기본 600초
 
 ## 매일 리마인더
 

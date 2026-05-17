@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -38,6 +38,10 @@ DB_FILE = Path(os.getenv("BOT_DB_PATH", "data/bot.sqlite3"))
 DB_LOCK = threading.RLock()
 QUIZ_STATE_TTL_DAYS = int(os.getenv("QUIZ_STATE_TTL_DAYS", "3"))
 ERROR_LOG_TTL_DAYS = int(os.getenv("ERROR_LOG_TTL_DAYS", "14"))
+TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS = int(
+    os.getenv("TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS", "600")
+)
+LAST_TRANSIENT_NETWORK_ERROR_AT: datetime | None = None
 try:
     KST = ZoneInfo("Asia/Seoul")
 except Exception:
@@ -288,6 +292,25 @@ def is_unreachable_chat_error(error: BaseException) -> bool:
     if isinstance(error, BadRequest):
         return "chat not found" in message
     return False
+
+
+def is_transient_network_error(error: BaseException) -> bool:
+    return isinstance(error, (NetworkError, TimedOut))
+
+
+def should_log_bot_error(error: BaseException) -> bool:
+    global LAST_TRANSIENT_NETWORK_ERROR_AT
+    if not is_transient_network_error(error):
+        return True
+
+    now = datetime.now(KST)
+    with DB_LOCK:
+        if LAST_TRANSIENT_NETWORK_ERROR_AT is not None:
+            elapsed = (now - LAST_TRANSIENT_NETWORK_ERROR_AT).total_seconds()
+            if elapsed < TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS:
+                return False
+        LAST_TRANSIENT_NETWORK_ERROR_AT = now
+    return True
 
 
 def database_counts() -> dict[str, int]:
@@ -1534,7 +1557,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if context.error:
         if is_ignorable_telegram_error(context.error):
             return
-        log_bot_error(update, context.error)
+        if should_log_bot_error(context.error):
+            log_bot_error(update, context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
             await update.effective_message.reply_text(
