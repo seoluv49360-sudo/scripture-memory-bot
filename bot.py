@@ -32,6 +32,7 @@ load_dotenv()
 
 MODE_FULL = "full"
 MODE_BLANK = "blank"
+MODE_MOCK = "mock"
 SCRIPTURE_PLACEHOLDER = "개역한글 본문을 여기에 입력해 주세요."
 REMINDER_FILE = Path("reminders.json")
 DB_FILE = Path(os.getenv("BOT_DB_PATH", "data/bot.sqlite3"))
@@ -91,6 +92,8 @@ class QuizState:
     options: list[str] = field(default_factory=list)
     selected_indexes: list[int] = field(default_factory=list)
     typed_answers: list[str] = field(default_factory=list)
+    mock_scripture_ids: list[str] = field(default_factory=list)
+    mock_scores: list[int] = field(default_factory=list)
     prompt_message_id: int | None = None
 
 
@@ -487,6 +490,7 @@ def scripture_keyboard(chat_id: int | None = None) -> InlineKeyboardMarkup:
             current_row = []
     if current_row:
         rows.append(current_row)
+    rows.append([InlineKeyboardButton("📝 3문제 모의고사", callback_data="mock:start")])
     if chat_id is None or chat_id not in load_reminder_chats():
         rows.append(
             [
@@ -494,6 +498,21 @@ def scripture_keyboard(chat_id: int | None = None) -> InlineKeyboardMarkup:
             ]
         )
     return InlineKeyboardMarkup(rows)
+
+
+def mock_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📖 성구 선택으로 돌아가기", callback_data="menu")]]
+    )
+
+
+def mock_result_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📝 모의고사 다시 보기", callback_data="mock:start")],
+            [InlineKeyboardButton("📖 성구 선택", callback_data="menu")],
+        ]
+    )
 
 
 def select_scripture_keyboard() -> InlineKeyboardMarkup:
@@ -744,12 +763,81 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def make_mock_quiz() -> QuizState:
+    scriptures = random.sample(SCRIPTURES, k=min(3, len(SCRIPTURES)))
+    scripture_ids = [scripture["id"] for scripture in scriptures]
+    first_scripture = scriptures[0]
+    return QuizState(
+        scripture_id=first_scripture["id"],
+        mode=MODE_MOCK,
+        answers=[first_scripture["text"]],
+        mock_scripture_ids=scripture_ids,
+    )
+
+
+def mock_prompt_text(quiz: QuizState) -> str:
+    current_index = len(quiz.mock_scores) + 1
+    total = len(quiz.mock_scripture_ids)
+    scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
+    return (
+        "📝 3문제 전체암기 모의고사\n\n"
+        f"문제 {current_index}/{total}\n"
+        f"📌 {scripture['reference']}\n\n"
+        "성구 전체를 입력해 주세요.\n"
+        "띄어쓰기, 줄바꿈, 문장부호, 절 번호는 점수에 크게 영향을 주지 않습니다."
+    )
+
+
+async def start_mock_exam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_visit(update)
+    clear_quiz(update, context)
+    message = update.effective_message
+    if not message:
+        return
+    quiz = make_mock_quiz()
+    set_quiz(update, context, quiz)
+    await message.reply_text(mock_prompt_text(quiz), reply_markup=mock_back_keyboard())
+
+
+def mock_result_message(quiz: QuizState) -> str:
+    total = len(quiz.mock_scores)
+    score_sum = sum(quiz.mock_scores)
+    average = round(score_sum / total) if total else 0
+    lines = [
+        "🎓 모의고사 결과",
+        "",
+        f"총점: {score_sum} / {total * 100}점",
+        f"평균: {average}점",
+        "",
+        "📋 문제별 점수",
+    ]
+    for index, (scripture_id, score) in enumerate(zip(quiz.mock_scripture_ids, quiz.mock_scores), start=1):
+        reference = SCRIPTURE_BY_ID[scripture_id]["reference"]
+        lines.append(f"{index}. {reference}: {score}점")
+
+    lowest_score = min(quiz.mock_scores) if quiz.mock_scores else 0
+    review_ids = [
+        scripture_id
+        for scripture_id, score in zip(quiz.mock_scripture_ids, quiz.mock_scores)
+        if score == lowest_score
+    ]
+    if review_ids and lowest_score < 90:
+        review_reference = SCRIPTURE_BY_ID[review_ids[0]]["reference"]
+        lines.extend(["", f"📖 추천 복습: {review_reference}"])
+    elif average >= 90:
+        lines.extend(["", "✨ 아주 좋아요. 전체 흐름이 잘 잡혀 있습니다."])
+    else:
+        lines.extend(["", "📖 90점 이하 성구를 한 번 더 읽고 다시 도전해 보세요."])
+    return "\n".join(lines)
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_visit(update)
     if not update.effective_message:
         return
     await update.effective_message.reply_text(
         "📖 /start - 성구 선택\n"
+        "📝 /mock - 3문제 전체암기 모의고사\n"
         "🔔 /remind_on - 매일 오전 8시 랜덤 성구 받기\n"
         "📊 /status - 봇 상태 확인\n"
         "🛑 /cancel - 현재 문제 취소\n\n"
@@ -1249,6 +1337,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
+    if data == "mock:start":
+        clear_quiz(update, context)
+        quiz = make_mock_quiz()
+        set_quiz(update, context, quiz)
+        await query.edit_message_text(
+            mock_prompt_text(quiz),
+            reply_markup=mock_back_keyboard(),
+        )
+        return
+
     if data == "blank_reset":
         quiz = get_quiz(update, context)
         if not quiz or quiz.mode != MODE_BLANK:
@@ -1489,6 +1587,27 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
     submitted = message.text
 
+    if quiz.mode == MODE_MOCK:
+        score, _ = score_answer(quiz.answers[0], submitted)
+        quiz.mock_scores.append(score)
+
+        if len(quiz.mock_scores) >= len(quiz.mock_scripture_ids):
+            result_text = mock_result_message(quiz)
+            clear_quiz(update, context)
+            await message.reply_text(result_text, reply_markup=mock_result_keyboard())
+            return
+
+        next_scripture_id = quiz.mock_scripture_ids[len(quiz.mock_scores)]
+        next_scripture = SCRIPTURE_BY_ID[next_scripture_id]
+        quiz.scripture_id = next_scripture_id
+        quiz.answers = [next_scripture["text"]]
+        set_quiz(update, context, quiz)
+        await message.reply_text(
+            f"✅ 이전 문제 점수: {score}점\n\n{mock_prompt_text(quiz)}",
+            reply_markup=mock_back_keyboard(),
+        )
+        return
+
     if quiz.mode == MODE_BLANK:
         if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
             if len(quiz.typed_answers) < len(quiz.answers):
@@ -1596,6 +1715,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("mock", start_mock_exam))
     app.add_handler(CommandHandler("admin_status", admin_status_command))
     app.add_handler(CommandHandler("admin_errors", admin_errors_command))
     app.add_handler(CommandHandler("admin_reset_errors", admin_reset_errors_command))
