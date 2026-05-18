@@ -506,13 +506,24 @@ def mock_back_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def mock_result_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def mock_result_keyboard(review_scripture_id: str | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    if review_scripture_id:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✍️ 추천 성구 바로 암송하기",
+                    callback_data=f"mode:{MODE_FULL}:{review_scripture_id}",
+                )
+            ]
+        )
+    rows.extend(
         [
             [InlineKeyboardButton("📝 모의고사 다시 보기", callback_data="mock:start")],
             [InlineKeyboardButton("📖 성구 선택", callback_data="menu")],
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 def select_scripture_keyboard() -> InlineKeyboardMarkup:
@@ -829,6 +840,18 @@ def mock_result_message(quiz: QuizState) -> str:
     else:
         lines.extend(["", "📖 90점 이하 성구를 한 번 더 읽고 다시 도전해 보세요."])
     return "\n".join(lines)
+
+
+def mock_review_scripture_id(quiz: QuizState) -> str | None:
+    if not quiz.mock_scores:
+        return None
+    lowest_score = min(quiz.mock_scores)
+    if lowest_score >= 90:
+        return None
+    for scripture_id, score in zip(quiz.mock_scripture_ids, quiz.mock_scores):
+        if score == lowest_score:
+            return scripture_id
+    return None
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1593,8 +1616,12 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if len(quiz.mock_scores) >= len(quiz.mock_scripture_ids):
             result_text = mock_result_message(quiz)
+            review_scripture_id = mock_review_scripture_id(quiz)
             clear_quiz(update, context)
-            await message.reply_text(result_text, reply_markup=mock_result_keyboard())
+            await message.reply_text(
+                result_text,
+                reply_markup=mock_result_keyboard(review_scripture_id),
+            )
             return
 
         next_scripture_id = quiz.mock_scripture_ids[len(quiz.mock_scores)]
