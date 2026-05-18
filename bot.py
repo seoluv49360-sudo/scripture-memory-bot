@@ -39,7 +39,7 @@ DB_LOCK = threading.RLock()
 QUIZ_STATE_TTL_DAYS = int(os.getenv("QUIZ_STATE_TTL_DAYS", "3"))
 ERROR_LOG_TTL_DAYS = int(os.getenv("ERROR_LOG_TTL_DAYS", "14"))
 TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS = int(
-    os.getenv("TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS", "600")
+    os.getenv("TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS", "3600")
 )
 LAST_TRANSIENT_NETWORK_ERROR_AT: datetime | None = None
 try:
@@ -1559,6 +1559,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         if should_log_bot_error(context.error):
             log_bot_error(update, context.error)
+        if is_transient_network_error(context.error):
+            return
     if isinstance(update, Update) and update.effective_message:
         try:
             await update.effective_message.reply_text(
