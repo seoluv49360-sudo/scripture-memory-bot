@@ -1409,9 +1409,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         target = data.split(":", 1)[1]
         if target == "all":
-            for index in range(min(len(quiz.mock_scores), len(quiz.mock_submissions))):
+            review_count = min(len(quiz.mock_scores), len(quiz.mock_submissions))
+            for index in range(review_count):
+                is_last_review = index == review_count - 1
                 await query.message.reply_text(
                     mock_review_message(quiz, index),
+                    reply_markup=(
+                        mock_result_keyboard(quiz, mock_review_scripture_id(quiz))
+                        if is_last_review
+                        else None
+                    ),
                     parse_mode="HTML",
                 )
             return
