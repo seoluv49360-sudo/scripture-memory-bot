@@ -174,6 +174,14 @@ def quiz_from_json(data: str) -> QuizState | None:
         return None
 
 
+def is_valid_quiz(quiz: QuizState | None) -> bool:
+    if not quiz:
+        return False
+    if quiz.scripture_id not in SCRIPTURE_BY_ID:
+        return False
+    return all(scripture_id in SCRIPTURE_BY_ID for scripture_id in quiz.mock_scripture_ids)
+
+
 def state_user_id(update: Update) -> int:
     if update.effective_user:
         return update.effective_user.id
@@ -221,11 +229,17 @@ def clear_quiz_state(user_id: int) -> None:
 
 def get_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> QuizState | None:
     quiz = context.user_data.get("quiz")
-    if quiz:
+    if quiz and is_valid_quiz(quiz):
         return quiz
-    quiz = load_quiz_state(state_user_id(update))
     if quiz:
+        clear_quiz(update, context)
+        return None
+    quiz = load_quiz_state(state_user_id(update))
+    if quiz and is_valid_quiz(quiz):
         context.user_data["quiz"] = quiz
+    elif quiz:
+        clear_quiz_state(state_user_id(update))
+        quiz = None
     return quiz
 
 
@@ -538,6 +552,13 @@ def mock_result_keyboard(
         ]
     )
     return InlineKeyboardMarkup(rows)
+
+
+async def show_scripture_scope_changed(query) -> None:
+    await query.edit_message_text(
+        "📖 암송 범위가 변경되었습니다.\n\n새 범위에서 성구를 다시 선택해 주세요.",
+        reply_markup=scripture_keyboard(query.message.chat_id),
+    )
 
 
 def select_scripture_keyboard() -> InlineKeyboardMarkup:
@@ -1586,6 +1607,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if data.startswith("scripture:"):
         scripture_id = data.split(":", 1)[1]
+        if scripture_id not in SCRIPTURE_BY_ID:
+            clear_quiz(update, context)
+            await show_scripture_scope_changed(query)
+            return
         scripture = SCRIPTURE_BY_ID[scripture_id]
         clear_quiz(update, context)
         if not has_scripture_text(scripture):
@@ -1609,6 +1634,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if data.startswith("mode:"):
         _, mode, scripture_id = data.split(":")
+        if scripture_id not in SCRIPTURE_BY_ID:
+            clear_quiz(update, context)
+            await show_scripture_scope_changed(query)
+            return
         scripture = SCRIPTURE_BY_ID[scripture_id]
 
         if mode == MODE_FULL:
@@ -1639,6 +1668,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if data.startswith("blank:"):
         _, difficulty, scripture_id = data.split(":")
+        if scripture_id not in SCRIPTURE_BY_ID:
+            clear_quiz(update, context)
+            await show_scripture_scope_changed(query)
+            return
         scripture = SCRIPTURE_BY_ID[scripture_id]
         quiz_source = format_scripture_text(scripture["text"], scripture["reference"])
         quiz_text, answers, quiz_words, blank_indexes, blank_suffixes = make_blank_quiz(quiz_source, difficulty)
