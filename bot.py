@@ -518,13 +518,12 @@ def mock_result_keyboard(quiz: QuizState, review_scripture_id: str | None = None
                 )
             ]
         )
-    for index, scripture_id in enumerate(quiz.mock_scripture_ids[: len(quiz.mock_submissions)], start=1):
-        reference = short_reference(SCRIPTURE_BY_ID[scripture_id]["reference"])
+    if quiz.mock_submissions:
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"🔎 {index}번 틀린 부분 확인 · {reference}",
-                    callback_data=f"mock_review:{index - 1}",
+                    "🔎 전체 틀린 부분 확인",
+                    callback_data="mock_review:all",
                 )
             ]
         )
@@ -1408,7 +1407,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        index = int(data.split(":", 1)[1])
+        target = data.split(":", 1)[1]
+        if target == "all":
+            for index in range(min(len(quiz.mock_scores), len(quiz.mock_submissions))):
+                await query.message.reply_text(
+                    mock_review_message(quiz, index),
+                    parse_mode="HTML",
+                )
+            return
+
+        index = int(target)
         if index < 0 or index >= len(quiz.mock_scores) or index >= len(quiz.mock_submissions):
             await query.message.reply_text("📝 해당 문항을 찾을 수 없습니다.")
             return
