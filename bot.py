@@ -94,6 +94,7 @@ class QuizState:
     typed_answers: list[str] = field(default_factory=list)
     mock_scripture_ids: list[str] = field(default_factory=list)
     mock_scores: list[int] = field(default_factory=list)
+    mock_submissions: list[str] = field(default_factory=list)
     prompt_message_id: int | None = None
 
 
@@ -502,11 +503,11 @@ def scripture_keyboard(chat_id: int | None = None) -> InlineKeyboardMarkup:
 
 def mock_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📖 성구 선택으로 돌아가기", callback_data="menu")]]
+        [[InlineKeyboardButton("🛑 모의고사 종료", callback_data="menu")]]
     )
 
 
-def mock_result_keyboard(review_scripture_id: str | None = None) -> InlineKeyboardMarkup:
+def mock_result_keyboard(quiz: QuizState, review_scripture_id: str | None = None) -> InlineKeyboardMarkup:
     rows = []
     if review_scripture_id:
         rows.append(
@@ -514,6 +515,16 @@ def mock_result_keyboard(review_scripture_id: str | None = None) -> InlineKeyboa
                 InlineKeyboardButton(
                     "✍️ 추천 성구 바로 암송하기",
                     callback_data=f"mode:{MODE_FULL}:{review_scripture_id}",
+                )
+            ]
+        )
+    for index, scripture_id in enumerate(quiz.mock_scripture_ids[: len(quiz.mock_submissions)], start=1):
+        reference = short_reference(SCRIPTURE_BY_ID[scripture_id]["reference"])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🔎 {index}번 틀린 부분 확인 · {reference}",
+                    callback_data=f"mock_review:{index - 1}",
                 )
             ]
         )
@@ -852,6 +863,21 @@ def mock_review_scripture_id(quiz: QuizState) -> str | None:
         if score == lowest_score:
             return scripture_id
     return None
+
+
+def mock_review_message(quiz: QuizState, index: int) -> str:
+    scripture_id = quiz.mock_scripture_ids[index]
+    scripture = SCRIPTURE_BY_ID[scripture_id]
+    score = quiz.mock_scores[index]
+    submitted = quiz.mock_submissions[index]
+    memory_diff = build_memory_diff(scripture["text"], submitted)
+    return (
+        f"🔎 모의고사 {index + 1}번 확인\n\n"
+        f"📌 {scripture['reference']}\n"
+        f"📊 점수: {score}점\n\n"
+        f"틀린 부분 표시:\n{memory_diff}\n\n"
+        f"📖 정답:\n{html.escape(format_scripture_text(scripture['text'], scripture['reference']))}"
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1370,6 +1396,30 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
+    if data.startswith("mock_review:"):
+        quiz = get_quiz(update, context)
+        if (
+            not quiz
+            or quiz.mode != MODE_MOCK
+            or len(quiz.mock_scores) < len(quiz.mock_scripture_ids)
+        ):
+            await query.message.reply_text(
+                "📝 확인할 모의고사 결과가 없습니다. /mock 으로 다시 시작해 주세요."
+            )
+            return
+
+        index = int(data.split(":", 1)[1])
+        if index < 0 or index >= len(quiz.mock_scores) or index >= len(quiz.mock_submissions):
+            await query.message.reply_text("📝 해당 문항을 찾을 수 없습니다.")
+            return
+
+        await query.message.reply_text(
+            mock_review_message(quiz, index),
+            reply_markup=mock_result_keyboard(quiz, mock_review_scripture_id(quiz)),
+            parse_mode="HTML",
+        )
+        return
+
     if data == "blank_reset":
         quiz = get_quiz(update, context)
         if not quiz or quiz.mode != MODE_BLANK:
@@ -1611,16 +1661,24 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     submitted = message.text
 
     if quiz.mode == MODE_MOCK:
+        if len(quiz.mock_scores) >= len(quiz.mock_scripture_ids):
+            await message.reply_text(
+                "📝 모의고사가 이미 완료되었습니다. 결과 화면의 버튼을 이용해 주세요.",
+                reply_markup=mock_result_keyboard(quiz, mock_review_scripture_id(quiz)),
+            )
+            return
+
         score, _ = score_answer(quiz.answers[0], submitted)
         quiz.mock_scores.append(score)
+        quiz.mock_submissions.append(submitted)
 
         if len(quiz.mock_scores) >= len(quiz.mock_scripture_ids):
             result_text = mock_result_message(quiz)
             review_scripture_id = mock_review_scripture_id(quiz)
-            clear_quiz(update, context)
+            set_quiz(update, context, quiz)
             await message.reply_text(
                 result_text,
-                reply_markup=mock_result_keyboard(review_scripture_id),
+                reply_markup=mock_result_keyboard(quiz, review_scripture_id),
             )
             return
 
@@ -1630,7 +1688,9 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         quiz.answers = [next_scripture["text"]]
         set_quiz(update, context, quiz)
         await message.reply_text(
-            f"✅ 이전 문제 점수: {score}점\n\n{mock_prompt_text(quiz)}",
+            f"✅ {len(quiz.mock_scores)}번 답안이 제출되었습니다.\n"
+            "점수는 마지막 결과에서 한 번에 공개됩니다.\n\n"
+            f"{mock_prompt_text(quiz)}",
             reply_markup=mock_back_keyboard(),
         )
         return
