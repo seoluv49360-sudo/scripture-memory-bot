@@ -507,7 +507,11 @@ def mock_back_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def mock_result_keyboard(quiz: QuizState, review_scripture_id: str | None = None) -> InlineKeyboardMarkup:
+def mock_result_keyboard(
+    quiz: QuizState,
+    review_scripture_id: str | None = None,
+    include_review_button: bool = True,
+) -> InlineKeyboardMarkup:
     rows = []
     if review_scripture_id:
         rows.append(
@@ -518,7 +522,7 @@ def mock_result_keyboard(quiz: QuizState, review_scripture_id: str | None = None
                 )
             ]
         )
-    if quiz.mock_submissions:
+    if include_review_button and quiz.mock_submissions:
         rows.append(
             [
                 InlineKeyboardButton(
@@ -1415,7 +1419,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 await query.message.reply_text(
                     mock_review_message(quiz, index),
                     reply_markup=(
-                        mock_result_keyboard(quiz, mock_review_scripture_id(quiz))
+                        mock_result_keyboard(
+                            quiz,
+                            mock_review_scripture_id(quiz),
+                            include_review_button=False,
+                        )
                         if is_last_review
                         else None
                     ),
