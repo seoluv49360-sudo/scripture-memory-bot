@@ -441,7 +441,10 @@ def score_answer(expected: str, submitted: str) -> tuple[int, bool]:
 
     ratio = difflib.SequenceMatcher(None, expected_norm, submitted_norm).ratio()
     score = round(ratio * 100)
-    return score, expected_norm == submitted_norm
+    is_exact = expected_norm == submitted_norm
+    if not is_exact:
+        score = min(score, 99)
+    return score, is_exact
 
 
 def build_memory_diff(expected: str, submitted: str) -> str:
