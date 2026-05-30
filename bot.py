@@ -451,40 +451,27 @@ def build_memory_diff(expected: str, submitted: str) -> str:
     expected_tokens = memory_tokens(expected)
     submitted_tokens = memory_tokens(submitted)
     expected_norm = "".join(token.lower() for token in expected_tokens)
-    submitted_norm = normalize_for_memory(submitted)
+    submitted_norm = "".join(token.lower() for token in submitted_tokens)
 
-    bad_positions = set()
-    inserted_segments = []
+    bad_submitted_positions = set()
     matcher = difflib.SequenceMatcher(None, expected_norm, submitted_norm)
     for tag, expected_start, expected_end, submitted_start, submitted_end in matcher.get_opcodes():
         if tag != "equal":
-            bad_positions.update(range(expected_start, expected_end))
-        if tag == "insert":
-            inserted = submitted_norm[submitted_start:submitted_end]
-            if inserted:
-                inserted_segments.append(inserted)
+            bad_submitted_positions.update(range(submitted_start, submitted_end))
 
     cursor = 0
     marked_tokens = []
-    for token in expected_tokens:
+    for token in submitted_tokens:
         token_length = len(token)
         token_positions = set(range(cursor, cursor + token_length))
         escaped = html.escape(token)
-        if token_positions & bad_positions:
+        if token_positions & bad_submitted_positions:
             marked_tokens.append(f"<b><u>{escaped}</u></b>")
         else:
             marked_tokens.append(escaped)
         cursor += token_length
 
-    diff_text = " ".join(marked_tokens)
-    if inserted_segments:
-        extra_text = ", ".join(html.escape(segment) for segment in inserted_segments[:3])
-        if len(inserted_segments) > 3:
-            extra_text += " ..."
-        diff_text += (
-            "\n\n⚠️ 정답 본문에는 없는 내용이 입력에 추가되어 있습니다."
-            f"\n추가된 내용: <b><u>{extra_text}</u></b>"
-        )
+    diff_text = " ".join(marked_tokens) if marked_tokens else "(입력 없음)"
     difference_summary = build_memory_difference_summary(expected_tokens, submitted_tokens)
     if difference_summary:
         diff_text += f"\n\n{difference_summary}"
@@ -951,7 +938,7 @@ def mock_review_message(quiz: QuizState, index: int) -> str:
         f"🔎 모의고사 {index + 1}번 확인\n\n"
         f"📌 {scripture['reference']}\n"
         f"📊 점수: {score}점\n\n"
-        f"틀린 부분 표시:\n{memory_diff}\n\n"
+        f"내가 입력한 내용에서 틀린 부분 표시:\n{memory_diff}\n\n"
         f"📖 정답:\n{html.escape(format_scripture_text(scripture['text'], scripture['reference']))}"
     )
 
@@ -1860,7 +1847,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await message.reply_text(
         f"{feedback_text}\n\n"
         f"📊 점수: {score}점\n\n"
-        f"🔎 틀린 부분 표시:\n{memory_diff}\n\n"
+        f"🔎 내가 입력한 내용에서 틀린 부분 표시:\n{memory_diff}\n\n"
         f"📖 정답:\n{html.escape(format_scripture_text(scripture['text'], scripture['reference']))}",
         reply_markup=full_result_keyboard(quiz.scripture_id),
         parse_mode="HTML",
