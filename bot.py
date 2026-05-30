@@ -449,6 +449,7 @@ def score_answer(expected: str, submitted: str) -> tuple[int, bool]:
 
 def build_memory_diff(expected: str, submitted: str) -> str:
     expected_tokens = memory_tokens(expected)
+    submitted_tokens = memory_tokens(submitted)
     expected_norm = "".join(token.lower() for token in expected_tokens)
     submitted_norm = normalize_for_memory(submitted)
 
@@ -484,7 +485,41 @@ def build_memory_diff(expected: str, submitted: str) -> str:
             "\n\n⚠️ 정답 본문에는 없는 내용이 입력에 추가되어 있습니다."
             f"\n추가된 내용: <b><u>{extra_text}</u></b>"
         )
+    difference_summary = build_memory_difference_summary(expected_tokens, submitted_tokens)
+    if difference_summary:
+        diff_text += f"\n\n{difference_summary}"
     return diff_text
+
+
+def build_memory_difference_summary(expected_tokens: list[str], submitted_tokens: list[str]) -> str:
+    expected_keys = [token.lower() for token in expected_tokens]
+    submitted_keys = [token.lower() for token in submitted_tokens]
+    matcher = difflib.SequenceMatcher(None, expected_keys, submitted_keys)
+    lines = []
+    omitted_count = 0
+
+    for tag, expected_start, expected_end, submitted_start, submitted_end in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+
+        if len(lines) >= 5:
+            omitted_count += 1
+            continue
+
+        expected_part = " ".join(expected_tokens[expected_start:expected_end]) or "(없음)"
+        submitted_part = " ".join(submitted_tokens[submitted_start:submitted_end]) or "(없음)"
+        lines.append(
+            "- 제출: "
+            f"<b><u>{html.escape(submitted_part)}</u></b>\n"
+            "  정답: "
+            f"<b><u>{html.escape(expected_part)}</u></b>"
+        )
+
+    if not lines:
+        return ""
+    if omitted_count:
+        lines.append("- 나머지 차이는 위 본문 표시를 확인해 주세요.")
+    return "🔎 다른 부분:\n" + "\n".join(lines)
 
 
 def has_scripture_text(scripture: dict[str, str]) -> bool:
