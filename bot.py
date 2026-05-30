@@ -453,10 +453,15 @@ def build_memory_diff(expected: str, submitted: str) -> str:
     submitted_norm = normalize_for_memory(submitted)
 
     bad_positions = set()
+    inserted_segments = []
     matcher = difflib.SequenceMatcher(None, expected_norm, submitted_norm)
-    for tag, expected_start, expected_end, _, _ in matcher.get_opcodes():
+    for tag, expected_start, expected_end, submitted_start, submitted_end in matcher.get_opcodes():
         if tag != "equal":
             bad_positions.update(range(expected_start, expected_end))
+        if tag == "insert":
+            inserted = submitted_norm[submitted_start:submitted_end]
+            if inserted:
+                inserted_segments.append(inserted)
 
     cursor = 0
     marked_tokens = []
@@ -470,7 +475,16 @@ def build_memory_diff(expected: str, submitted: str) -> str:
             marked_tokens.append(escaped)
         cursor += token_length
 
-    return " ".join(marked_tokens)
+    diff_text = " ".join(marked_tokens)
+    if inserted_segments:
+        extra_text = ", ".join(html.escape(segment) for segment in inserted_segments[:3])
+        if len(inserted_segments) > 3:
+            extra_text += " ..."
+        diff_text += (
+            "\n\n⚠️ 정답 본문에는 없는 내용이 입력에 추가되어 있습니다."
+            f"\n추가된 내용: <b><u>{extra_text}</u></b>"
+        )
+    return diff_text
 
 
 def has_scripture_text(scripture: dict[str, str]) -> bool:
