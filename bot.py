@@ -544,7 +544,8 @@ def scripture_keyboard(chat_id: int | None = None) -> InlineKeyboardMarkup:
             current_row = []
     if current_row:
         rows.append(current_row)
-    rows.append([InlineKeyboardButton("📝 3문제 모의고사", callback_data="mock:start")])
+    rows.append([InlineKeyboardButton("📝 3문제 모의고사", callback_data="mock:start:3")])
+    rows.append([InlineKeyboardButton("📝 5문제 모의고사", callback_data="mock:start:5")])
     if chat_id is None or chat_id not in load_reminder_chats():
         rows.append(
             [
@@ -586,7 +587,12 @@ def mock_result_keyboard(
         )
     rows.extend(
         [
-            [InlineKeyboardButton("📝 모의고사 다시 보기", callback_data="mock:start")],
+            [
+                InlineKeyboardButton(
+                    f"📝 {len(quiz.mock_scripture_ids)}문제 모의고사 다시 보기",
+                    callback_data=f"mock:start:{len(quiz.mock_scripture_ids)}",
+                )
+            ],
             [InlineKeyboardButton("📖 성구 선택", callback_data="menu")],
         ]
     )
@@ -848,8 +854,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def make_mock_quiz() -> QuizState:
-    scriptures = random.sample(SCRIPTURES, k=min(3, len(SCRIPTURES)))
+def make_mock_quiz(question_count: int = 3) -> QuizState:
+    scriptures = random.sample(SCRIPTURES, k=min(question_count, len(SCRIPTURES)))
     scripture_ids = [scripture["id"] for scripture in scriptures]
     first_scripture = scriptures[0]
     return QuizState(
@@ -865,7 +871,7 @@ def mock_prompt_text(quiz: QuizState) -> str:
     total = len(quiz.mock_scripture_ids)
     scripture = SCRIPTURE_BY_ID[quiz.scripture_id]
     return (
-        "📝 3문제 전체암기 모의고사\n\n"
+        f"📝 {total}문제 전체암기 모의고사\n\n"
         f"문제 {current_index}/{total}\n"
         f"📌 {scripture['reference']}\n\n"
         "성구 전체를 입력해 주세요.\n"
@@ -873,15 +879,19 @@ def mock_prompt_text(quiz: QuizState) -> str:
     )
 
 
-async def start_mock_exam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_mock_exam(update: Update, context: ContextTypes.DEFAULT_TYPE, question_count: int = 3) -> None:
     record_visit(update)
     clear_quiz(update, context)
     message = update.effective_message
     if not message:
         return
-    quiz = make_mock_quiz()
+    quiz = make_mock_quiz(question_count)
     set_quiz(update, context, quiz)
     await message.reply_text(mock_prompt_text(quiz), reply_markup=mock_back_keyboard())
+
+
+async def start_mock_5_exam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await start_mock_exam(update, context, question_count=5)
 
 
 def mock_result_message(quiz: QuizState) -> str:
@@ -950,6 +960,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(
         "📖 /start - 성구 선택\n"
         "📝 /mock - 3문제 전체암기 모의고사\n"
+        "📝 /mock5 - 5문제 전체암기 모의고사\n"
         "🔔 /remind_on - 매일 오전 8시 랜덤 성구 받기\n"
         "📊 /status - 봇 상태 확인\n"
         "🛑 /cancel - 현재 문제 취소\n\n"
@@ -1449,9 +1460,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-    if data == "mock:start":
+    if data.startswith("mock:start"):
         clear_quiz(update, context)
-        quiz = make_mock_quiz()
+        parts = data.split(":")
+        question_count = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 3
+        quiz = make_mock_quiz(question_count)
         set_quiz(update, context, quiz)
         await query.edit_message_text(
             mock_prompt_text(quiz),
@@ -1898,6 +1911,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("mock", start_mock_exam))
+    app.add_handler(CommandHandler("mock5", start_mock_5_exam))
     app.add_handler(CommandHandler("admin_status", admin_status_command))
     app.add_handler(CommandHandler("admin_errors", admin_errors_command))
     app.add_handler(CommandHandler("admin_reset_errors", admin_reset_errors_command))
