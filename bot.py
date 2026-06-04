@@ -552,6 +552,12 @@ def scripture_keyboard(chat_id: int | None = None) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🔔 매일 8시 리마인더 받기", callback_data="reminder:on"),
             ]
         )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton("🔕 매일 8시 리마인더 해제", callback_data="reminder:off"),
+            ]
+        )
     return InlineKeyboardMarkup(rows)
 
 
@@ -612,9 +618,12 @@ def select_scripture_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def reminder_start_keyboard() -> InlineKeyboardMarkup:
+def reminder_enabled_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📖 성구 암송하러 가기", callback_data="menu")]]
+        [
+            [InlineKeyboardButton("📖 성구 암송하러 가기", callback_data="menu")],
+            [InlineKeyboardButton("🔕 매일 8시 리마인더 해제", callback_data="reminder:off")],
+        ]
     )
 
 
@@ -663,6 +672,13 @@ def schedule_daily_reminder(application: Application, chat_id: int) -> bool:
     return True
 
 
+def unschedule_daily_reminder(application: Application, chat_id: int) -> None:
+    if application.job_queue is not None:
+        for job in application.job_queue.get_jobs_by_name(reminder_job_name(chat_id)):
+            job.schedule_removal()
+    remove_reminder_chat(chat_id)
+
+
 def schedule_saved_reminders(application: Application) -> None:
     for chat_id in load_reminder_chats():
         schedule_daily_reminder(application, chat_id)
@@ -679,7 +695,7 @@ async def send_daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"{format_scripture_text(scripture['text'], scripture['reference'])}\n\n"
                 "✍️ 조용히 한 번 읽고, 눈을 감고 다시 떠올려 보세요."
             ),
-            reply_markup=reminder_start_keyboard(),
+            reply_markup=reminder_enabled_keyboard(),
         )
     except TelegramError as error:
         if is_unreachable_chat_error(error):
@@ -1070,7 +1086,7 @@ async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     save_reminder_chats(chat_ids)
     await update.effective_message.reply_text(
         "🔔 매일 오전 8시에 랜덤 암송 성구 1개를 보내드릴게요.",
-        reply_markup=select_scripture_keyboard(),
+        reply_markup=reminder_enabled_keyboard(),
     )
 
 
@@ -1456,6 +1472,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             save_reminder_chats(chat_ids)
             await query.edit_message_text(
                 "🔔 매일 오전 8시에 랜덤 암송 성구 1개를 보내드릴게요.",
+                reply_markup=reminder_enabled_keyboard(),
+            )
+            return
+
+        if action == "off":
+            unschedule_daily_reminder(context.application, chat_id)
+            await query.edit_message_text(
+                "🔕 매일 오전 8시 리마인더를 해제했습니다.",
                 reply_markup=select_scripture_keyboard(),
             )
             return
