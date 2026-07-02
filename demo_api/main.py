@@ -80,6 +80,7 @@ class ChatMessage(BaseModel):
     text: str
     buttons: list[dict[str, str]]
     parse_mode: str | None = None
+    edit: bool = False
 
 
 class ChatResponse(BaseModel):

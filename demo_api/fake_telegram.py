@@ -42,13 +42,16 @@ class RecordingBot(ExtBot):
     def sent(self) -> list[dict[str, Any]]:
         return self._sent
 
-    def _record(self, chat_id: int, text: str, reply_markup: Any, parse_mode: Any) -> Message:
+    def _record(self, chat_id: int, text: str, reply_markup: Any, parse_mode: Any, *, edit: bool) -> Message:
         self._sent.append({
             "text": text,
             "buttons": _extract_buttons(reply_markup),
             # bot.py는 사용자 입력을 항상 html.escape()로 이스케이프한 뒤 <b><u> 등으로 감싸서
             # parse_mode="HTML"로 보낸다 — 프론트는 이 값이 "HTML"일 때만 HTML로 렌더링해야 한다.
             "parse_mode": str(parse_mode) if parse_mode else None,
+            # edit_message_text 호출이면 True — 실제 텔레그램처럼 "새 말풍선" 대신 "이전 말풍선 수정"으로
+            # 프론트가 반영할 수 있게 구분해서 내려준다(빈칸 넣기 등에서 실제 봇이 하는 동작).
+            "edit": edit,
         })
         message_id = self._next_message_id
         self._next_message_id += 1
@@ -63,12 +66,12 @@ class RecordingBot(ExtBot):
         return message
 
     async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None, **kwargs) -> Message:  # type: ignore[override]
-        return self._record(int(chat_id), text, reply_markup, parse_mode)
+        return self._record(int(chat_id), text, reply_markup, parse_mode, edit=False)
 
     async def edit_message_text(  # type: ignore[override]
         self, text, chat_id=None, message_id=None, inline_message_id=None, reply_markup=None, parse_mode=None, **kwargs
     ) -> Message:
-        return self._record(int(chat_id) if chat_id is not None else 0, text, reply_markup, parse_mode)
+        return self._record(int(chat_id) if chat_id is not None else 0, text, reply_markup, parse_mode, edit=True)
 
     async def answer_callback_query(self, callback_query_id, text=None, **kwargs) -> bool:  # type: ignore[override]
         return True
