@@ -1,0 +1,18 @@
+# 성구 암송 봇 "라이브 데모" 전용 이미지 — 실제 운영 봇(Dockerfile, 텔레그램 폴링)과 완전히 분리.
+# bot.py를 그대로 import해서 재사용하되, 텔레그램 네트워크를 전혀 쓰지 않는 FastAPI 서버로 띄운다.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt ./
+COPY demo_api/requirements.txt ./demo_api/requirements.txt
+RUN pip install --no-cache-dir -r demo_api/requirements.txt
+
+COPY bot.py scriptures.py ./
+COPY demo_api/ ./demo_api/
+
+EXPOSE 8000
+CMD ["uvicorn", "demo_api.main:app", "--host", "0.0.0.0", "--port", "8000"]

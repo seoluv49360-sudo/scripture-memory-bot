@@ -1,0 +1,13 @@
+# 라이브 데모 API 오버레이 — 기존 docker-compose.yml(실제 텔레그램 폴링 봇)과 별개로 기동.
+# 사용법: docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+services:
+  demo-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.demo
+    container_name: scripture-memory-bot-demo-api
+    restart: unless-stopped
+    environment:
+      - ALLOWED_ORIGINS=${DEMO_ALLOWED_ORIGINS:-}
+    expose:
+      - "8000"

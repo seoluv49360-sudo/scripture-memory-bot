@@ -1,0 +1,6 @@
+{$DEMO_SITE_DOMAIN} {
+    basic_auth {
+        {$DEMO_BASIC_AUTH_USER} {$DEMO_BASIC_AUTH_HASH}
+    }
+    reverse_proxy demo-api:8000
+}

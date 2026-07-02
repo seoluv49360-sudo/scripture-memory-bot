@@ -140,3 +140,44 @@ docker compose down
 성구 목록은 `scriptures.py` 에 있습니다. 현재 항목은 요청한 요한계시록 5개 구절로 맞춰져 있습니다.
 
 개역한글 본문은 저작권이 있는 번역본이므로, 사용 권한이 있는 본문을 `text` 값에 직접 붙여 넣어 사용하세요.
+
+## 라이브 데모 API (`demo_api/`)
+
+services-portal(개발 현황 브리핑 포털)에서 실제로 이 봇과 대화해볼 수 있게 해주는 별도 API입니다.
+`bot.py`를 그대로 import해서 진짜 핸들러 코드를 실행하되, 텔레그램 네트워크는 전혀 쓰지 않습니다
+(`demo_api/fake_telegram.py`가 전송 메서드를 가로채서 응답을 기록만 함). **실제 운영 봇(위 `docker
+compose up`으로 띄운 것, 진짜 텔레그램 폴링)과는 완전히 분리된 별도 컨테이너·별도 SQLite 파일**을
+쓰므로 운영 데이터에는 전혀 영향이 없습니다.
+
+### 로컬에서 확인
+
+```bash
+pip install -r demo_api/requirements.txt
+uvicorn demo_api.main:app --reload
+```
+
+```bash
+curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "{\"session_id\":\"test\"}"
+```
+
+### 배포
+
+1. `.env`에 `DEMO_SITE_DOMAIN`/`DEMO_BASIC_AUTH_USER`/`DEMO_BASIC_AUTH_HASH`/`DEMO_ALLOWED_ORIGINS` 채우기
+   (해시 생성: `docker run --rm caddy:2-alpine caddy hash-password --plaintext '비밀번호'`,
+   `.env`에 넣을 때 해시의 `$`는 `$$`로 두 번씩 — docker compose 변수치환 함정).
+2. 기존 봇과 별개로 데모 API만 기동:
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+   ```
+3. 이 PC/서버에 80/443 쓰는 다른 Caddy가 없으면 `docker-compose.standalone-caddy.yml`도 같이 붙이고,
+   있으면 services-portal에서 했던 것과 같은 방식으로 그 Caddy에 이 프로젝트의 `Caddyfile` 내용
+   (`basic_auth` 포함)을 추가하고 네트워크 연결 후 reload.
+4. services-portal `src/data/services.ts`의 `scripture-memory-bot` 항목에 `liveBotDemo.apiUrl`을
+   이 데모 API의 실제 URL로 채우기.
+
+### 알아둘 점
+
+- 세션 상태는 프로세스 메모리에만 있음 — 컨테이너 재시작하면 전부 초기화됨(의도된 동작).
+- `RecordingBot`은 실제 `TELEGRAM_BOT_TOKEN`이 필요 없음(네트워크 호출 자체를 안 함).
+- 리마인더 예약(`🔔 매일 8시 리마인더 받기`)이나 관리자 명령 등 일부 분기는 데모에서 의도적으로
+  지원 범위 밖입니다 — 핵심 퀴즈 흐름(성구 선택 → 전체암기/빈칸넣기 → 채점)만 검증됨.
