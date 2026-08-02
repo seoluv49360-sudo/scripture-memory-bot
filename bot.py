@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import hmac
 import html
 import json
 import os
@@ -8,6 +9,8 @@ import re
 import sqlite3
 import sys
 import threading
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -15,10 +18,12 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatType
 from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -28,7 +33,7 @@ from telegram.ext import (
 from scriptures import SCRIPTURE_BY_ID, SCRIPTURES
 
 
-load_dotenv()
+load_dotenv(override=False)
 
 MODE_FULL = "full"
 MODE_BLANK = "blank"
@@ -42,6 +47,13 @@ ERROR_LOG_TTL_DAYS = int(os.getenv("ERROR_LOG_TTL_DAYS", "14"))
 TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS = int(
     os.getenv("TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS", "3600")
 )
+REQUEST_LIMIT_COUNT = int(os.getenv("REQUEST_LIMIT_COUNT", "12"))
+REQUEST_LIMIT_WINDOW_SECONDS = int(os.getenv("REQUEST_LIMIT_WINDOW_SECONDS", "10"))
+AUTH_FAILURE_LIMIT = int(os.getenv("AUTH_FAILURE_LIMIT", "5"))
+AUTH_FAILURE_WINDOW_SECONDS = int(os.getenv("AUTH_FAILURE_WINDOW_SECONDS", "900"))
+AUTH_BLOCK_SECONDS = int(os.getenv("AUTH_BLOCK_SECONDS", "1800"))
+REQUEST_TIMESTAMPS: dict[int, deque[datetime]] = {}
+REQUEST_LOCK = threading.RLock()
 LAST_TRANSIENT_NETWORK_ERROR_AT: datetime | None = None
 try:
     KST = ZoneInfo("Asia/Seoul")
@@ -79,6 +91,18 @@ def configured_admin_ids() -> set[int]:
     return admin_ids
 
 
+def configured_member_access_token() -> str:
+    return os.getenv("MEMBER_ACCESS_TOKEN", "").strip()
+
+
+def is_valid_telegram_bot_token(token: str) -> bool:
+    return bool(re.fullmatch(r"\d{6,12}:[A-Za-z0-9_-]{30,}", token))
+
+
+def is_bot_token_rotation_confirmed() -> bool:
+    return os.getenv("BOT_TOKEN_ROTATION_CONFIRMED", "").strip().lower() == "true"
+
+
 @dataclass
 class QuizState:
     scripture_id: str
@@ -98,12 +122,16 @@ class QuizState:
     prompt_message_id: int | None = None
 
 
-def db_connect() -> sqlite3.Connection:
+@contextmanager
+def db_connect():
     DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_FILE)
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA busy_timeout=5000")
-    return connection
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=5000")
+        yield connection
+    finally:
+        connection.close()
 
 
 def init_database() -> None:
@@ -143,6 +171,50 @@ def init_database() -> None:
                 first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (visit_date, user_id)
             )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS approved_members (
+                user_id INTEGER PRIMARY KEY,
+                approved_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS administrators (
+                user_id INTEGER PRIMARY KEY,
+                granted_by INTEGER,
+                granted_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_failures (
+                user_id INTEGER PRIMARY KEY,
+                window_started_at TEXT NOT NULL,
+                failure_count INTEGER NOT NULL,
+                blocked_until TEXT
+            )
+            """
+        )
+        for admin_id in configured_admin_ids():
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO administrators (user_id, granted_by, granted_at)
+                VALUES (?, ?, ?)
+                """,
+                (admin_id, admin_id, kst_now_text()),
+            )
+        connection.execute(
+            """
+            UPDATE bot_errors
+            SET update_payload = '{"kind":"legacy_redacted"}',
+                error = 'LegacyError'
+            WHERE update_payload IS NULL
+               OR update_payload NOT LIKE '{"update_id":%'
             """
         )
         connection.commit()
@@ -253,15 +325,246 @@ def clear_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_quiz_state(state_user_id(update))
 
 
+def is_approved_member(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    if is_admin_user(user_id):
+        return True
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM approved_members WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return row is not None
+
+
+def approve_member(user_id: int) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO approved_members (user_id, approved_at)
+            VALUES (?, ?)
+            """,
+            (user_id, kst_now_text()),
+        )
+        connection.commit()
+
+
+def member_access_payload_matches(payload: str) -> bool:
+    expected = configured_member_access_token()
+    return bool(expected and payload and hmac.compare_digest(payload, expected))
+
+
+def is_valid_member_access_token(token: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{32,64}", token))
+
+
+def is_admin_user(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    if user_id in configured_admin_ids():
+        return True
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM administrators WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return row is not None
+
+
+def add_administrator(user_id: int, granted_by: int) -> bool:
+    with DB_LOCK, db_connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO administrators (user_id, granted_by, granted_at)
+            VALUES (?, ?, ?)
+            """,
+            (user_id, granted_by, kst_now_text()),
+        )
+        connection.commit()
+    return cursor.rowcount > 0
+
+
+def remove_administrator(user_id: int, requested_by: int) -> tuple[bool, str]:
+    if user_id in configured_admin_ids():
+        return False, ".env에 등록된 비상 관리자는 제거할 수 없습니다."
+    if user_id == requested_by:
+        return False, "현재 사용 중인 자신의 관리자 권한은 제거할 수 없습니다."
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM administrators WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return False, "등록된 관리자가 아닙니다."
+        effective_admins = {
+            int(row[0])
+            for row in connection.execute("SELECT user_id FROM administrators").fetchall()
+        } | configured_admin_ids()
+        if len(effective_admins) <= 1:
+            return False, "마지막 관리자 권한은 제거할 수 없습니다."
+        connection.execute("DELETE FROM administrators WHERE user_id = ?", (user_id,))
+        connection.commit()
+    return True, "관리자 권한을 제거했습니다."
+
+
+def request_allowed(user_id: int | None, now: datetime | None = None) -> bool:
+    if user_id is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    cutoff = current - timedelta(seconds=REQUEST_LIMIT_WINDOW_SECONDS)
+    with REQUEST_LOCK:
+        timestamps = REQUEST_TIMESTAMPS.setdefault(user_id, deque())
+        while timestamps and timestamps[0] <= cutoff:
+            timestamps.popleft()
+        if len(timestamps) >= REQUEST_LIMIT_COUNT:
+            return False
+        timestamps.append(current)
+    return True
+
+
+def auth_failure_is_blocked(user_id: int, now: datetime | None = None) -> bool:
+    current = now or datetime.now(timezone.utc)
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            "SELECT blocked_until FROM auth_failures WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    if not row or not row[0]:
+        return False
+    return datetime.fromisoformat(str(row[0])) > current
+
+
+def record_auth_failure(user_id: int, now: datetime | None = None) -> bool:
+    current = now or datetime.now(timezone.utc)
+    with DB_LOCK, db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT window_started_at, failure_count, blocked_until
+            FROM auth_failures
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        window_start = current
+        failure_count = 1
+        if row:
+            previous_start = datetime.fromisoformat(str(row[0]))
+            blocked_until = datetime.fromisoformat(str(row[2])) if row[2] else None
+            if blocked_until and blocked_until > current:
+                return True
+            if current - previous_start < timedelta(seconds=AUTH_FAILURE_WINDOW_SECONDS):
+                window_start = previous_start
+                failure_count = int(row[1]) + 1
+        new_blocked_until = None
+        if failure_count >= AUTH_FAILURE_LIMIT:
+            new_blocked_until = current + timedelta(seconds=AUTH_BLOCK_SECONDS)
+        connection.execute(
+            """
+            INSERT INTO auth_failures (
+                user_id, window_started_at, failure_count, blocked_until
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                window_started_at = excluded.window_started_at,
+                failure_count = excluded.failure_count,
+                blocked_until = excluded.blocked_until
+            """,
+            (
+                user_id,
+                window_start.isoformat(),
+                failure_count,
+                new_blocked_until.isoformat() if new_blocked_until else None,
+            ),
+        )
+        connection.commit()
+    return new_blocked_until is not None
+
+
+def clear_auth_failures(user_id: int) -> None:
+    with DB_LOCK, db_connect() as connection:
+        connection.execute("DELETE FROM auth_failures WHERE user_id = ?", (user_id,))
+        connection.commit()
+
+
+async def require_private_chat(update: Update) -> bool:
+    chat = update.effective_chat
+    if chat and chat.type == ChatType.PRIVATE:
+        return True
+    if chat and chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        try:
+            await update.get_bot().leave_chat(chat.id)
+        except (TelegramError, RuntimeError):
+            pass
+    return False
+
+
+async def require_request_limit(update: Update) -> bool:
+    user_id = update.effective_user.id if update.effective_user else None
+    if request_allowed(user_id):
+        return True
+    message = "⏳ 요청이 너무 빠릅니다. 잠시 후 다시 시도해 주세요."
+    if update.callback_query:
+        try:
+            await update.callback_query.answer(message, show_alert=True)
+        except TelegramError:
+            pass
+    elif update.effective_message:
+        await update.effective_message.reply_text(message)
+    return False
+
+
+async def reject_non_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await require_private_chat(update)
+
+
+async def require_member(update: Update) -> bool:
+    if not await require_private_chat(update):
+        return False
+    if not await require_request_limit(update):
+        return False
+    user_id = update.effective_user.id if update.effective_user else None
+    if is_approved_member(user_id):
+        return True
+
+    message = "🔒 승인된 사용자만 이용할 수 있습니다.\n관리자에게 받은 초대 링크로 다시 접속해 주세요."
+    if update.callback_query:
+        try:
+            await update.callback_query.answer(message, show_alert=True)
+        except TelegramError:
+            pass
+    elif update.effective_message:
+        await update.effective_message.reply_text(message)
+    return False
+
+
+def safe_update_summary(update: object) -> str:
+    if not isinstance(update, Update):
+        return json.dumps({"kind": type(update).__name__}, ensure_ascii=True)
+    if update.callback_query:
+        kind = "callback_query"
+    elif update.message:
+        kind = "message"
+    elif update.edited_message:
+        kind = "edited_message"
+    else:
+        kind = "other"
+    return json.dumps(
+        {"update_id": update.update_id, "kind": kind},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def safe_error_summary(error: BaseException) -> str:
+    return type(error).__name__
+
+
 def log_bot_error(update: object, error: BaseException) -> None:
-    try:
-        update_payload = update.to_json() if hasattr(update, "to_json") else str(update)
-    except Exception:
-        update_payload = "<unserializable update>"
+    update_payload = safe_update_summary(update)
     with DB_LOCK, db_connect() as connection:
         connection.execute(
             "INSERT INTO bot_errors (created_at, update_payload, error) VALUES (?, ?, ?)",
-            (kst_now_text(), update_payload, repr(error)),
+            (kst_now_text(), update_payload, safe_error_summary(error)),
         )
         connection.commit()
 
@@ -805,6 +1108,13 @@ def blank_answer_for_slot(quiz: QuizState, slot_index: int) -> str | None:
     return quiz.options[quiz.selected_indexes[slot_index]]
 
 
+def is_valid_pick_selection(quiz: QuizState, option_index: int, message_id: int) -> bool:
+    return (
+        0 <= option_index < len(quiz.options)
+        and quiz.prompt_message_id == message_id
+    )
+
+
 def render_blank_text(quiz: QuizState) -> str:
     blank_slots = {word_index: slot_index for slot_index, word_index in enumerate(quiz.blank_indexes)}
     rendered_words = []
@@ -859,13 +1169,39 @@ def blank_prompt_text(scripture: dict[str, str], quiz: QuizState) -> str:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not update.effective_user:
+        return
+    if not await require_private_chat(update):
+        return
+    if not await require_request_limit(update):
+        return
+
+    newly_approved = False
+    if not is_approved_member(update.effective_user.id):
+        if auth_failure_is_blocked(update.effective_user.id):
+            await update.effective_message.reply_text(
+                "⏳ 인증 시도가 잠시 제한되었습니다. 나중에 다시 시도해 주세요."
+            )
+            return
+        payload = context.args[0] if len(context.args) == 1 else ""
+        if not member_access_payload_matches(payload):
+            record_auth_failure(update.effective_user.id)
+            await update.effective_message.reply_text(
+                "🔒 승인된 사용자만 이용할 수 있습니다.\n\n"
+                "관리자에게 받은 초대 링크로 접속해 주세요."
+            )
+            return
+        clear_auth_failures(update.effective_user.id)
+        approve_member(update.effective_user.id)
+        newly_approved = True
+
     record_visit(update)
     clear_quiz(update, context)
     context.user_data.clear()
-    if not update.effective_message:
-        return
+    approval_text = "✅ 사용자 승인이 확인되었습니다.\n\n" if newly_approved else ""
     await update.effective_message.reply_text(
-        "📖 암송할 성구를 선택하세요.\n\n원하는 구절을 누르면 연습 방식을 고를 수 있습니다.",
+        f"{approval_text}📖 암송할 성구를 선택하세요.\n\n"
+        "원하는 구절을 누르면 연습 방식을 고를 수 있습니다.",
         reply_markup=scripture_keyboard(update.effective_chat.id),
     )
 
@@ -896,6 +1232,8 @@ def mock_prompt_text(quiz: QuizState) -> str:
 
 
 async def start_mock_exam(update: Update, context: ContextTypes.DEFAULT_TYPE, question_count: int = 3) -> None:
+    if not await require_member(update):
+        return
     record_visit(update)
     clear_quiz(update, context)
     message = update.effective_message
@@ -970,6 +1308,8 @@ def mock_review_message(quiz: QuizState, index: int) -> str:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_member(update):
+        return
     record_visit(update)
     if not update.effective_message:
         return
@@ -986,6 +1326,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_member(update):
+        return
     record_visit(update)
     if not update.effective_message:
         return
@@ -1005,30 +1347,71 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def require_admin(update: Update) -> bool:
+    if not await require_private_chat(update):
+        return False
+    if not await require_request_limit(update):
+        return False
     message = update.effective_message
     if not message:
         return False
 
-    admin_ids = configured_admin_ids()
-    if not admin_ids:
+    user_id = update.effective_user.id if update.effective_user else None
+    if not configured_admin_ids() and not is_admin_user(user_id):
         await message.reply_text(
             "⚠️ 관리자 ID가 설정되어 있지 않습니다.\n\n"
             ".env 파일에 ADMIN_USER_IDS=내텔레그램ID 형식으로 입력해 주세요."
         )
         return False
 
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id not in admin_ids:
+    if not is_admin_user(user_id):
         await message.reply_text("🔒 관리자만 사용할 수 있는 명령어입니다.")
         return False
 
     return True
 
 
-async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    record_visit(update)
+def command_target_user_id(context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    if len(context.args) != 1:
+        return None
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        return None
+    return user_id if user_id > 0 else None
+
+
+async def admin_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
+    target_id = command_target_user_id(context)
+    if target_id is None:
+        await update.effective_message.reply_text("사용법: /admin_add 텔레그램사용자ID")
+        return
+    granted_by = update.effective_user.id
+    created = add_administrator(target_id, granted_by)
+    approve_member(target_id)
+    if created:
+        await update.effective_message.reply_text(f"✅ {target_id} 사용자를 관리자로 등록했습니다.")
+    else:
+        await update.effective_message.reply_text(f"ℹ️ {target_id} 사용자는 이미 관리자입니다.")
+
+
+async def admin_remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update):
+        return
+    target_id = command_target_user_id(context)
+    if target_id is None:
+        await update.effective_message.reply_text("사용법: /admin_remove 텔레그램사용자ID")
+        return
+    removed, message = remove_administrator(target_id, update.effective_user.id)
+    prefix = "✅" if removed else "⚠️"
+    await update.effective_message.reply_text(f"{prefix} {message}")
+
+
+async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update):
+        return
+    record_visit(update)
     counts = database_counts()
     await update.effective_message.reply_text(
         "🛠 관리자 상태\n\n"
@@ -1046,9 +1429,9 @@ async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_errors_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    record_visit(update)
     if not await require_admin(update):
         return
+    record_visit(update)
     rows = recent_bot_errors(limit=5)
     if not rows:
         await update.effective_message.reply_text("✅ 기록된 에러가 없습니다.")
@@ -1061,14 +1444,16 @@ async def admin_errors_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_reset_errors_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    record_visit(update)
     if not await require_admin(update):
         return
+    record_visit(update)
     count = reset_bot_errors()
     await update.effective_message.reply_text(f"🧹 기록된 에러 {count}개를 리셋했습니다.")
 
 
 async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_member(update):
+        return
     record_visit(update)
     if not update.effective_message or not update.effective_chat:
         return
@@ -1091,6 +1476,8 @@ async def remind_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_member(update):
+        return
     record_visit(update)
     clear_quiz(update, context)
     if not update.effective_message:
@@ -1437,15 +1824,20 @@ async def finish_blank_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    record_visit(update)
     query = update.callback_query
-    try:
-        await query.answer()
-    except TelegramError as error:
-        if not is_ignorable_telegram_error(error):
-            raise
-
+    if not query or not query.message or not query.data:
+        return
+    if not await require_member(update):
+        return
+    record_visit(update)
     data = query.data
+    if not data.startswith("pick:"):
+        try:
+            await query.answer()
+        except TelegramError as error:
+            if not is_ignorable_telegram_error(error):
+                raise
+
     if data == "menu":
         clear_quiz(update, context)
         await query.edit_message_text(
@@ -1668,7 +2060,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        option_index = int(data.split(":", 1)[1])
+        raw_option_index = data.split(":", 1)[1]
+        if not raw_option_index.isdigit():
+            await query.answer("잘못된 버튼입니다. 문제를 다시 시작해 주세요.", show_alert=True)
+            return
+        option_index = int(raw_option_index)
+        if not is_valid_pick_selection(quiz, option_index, query.message.message_id):
+            await query.answer("현재 문제의 버튼을 사용해 주세요.", show_alert=True)
+            return
+        await query.answer()
         if option_index not in quiz.selected_indexes:
             quiz.selected_indexes.append(option_index)
             set_quiz(update, context, quiz)
@@ -1780,6 +2180,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_member(update):
+        return
     record_visit(update)
     message = update.effective_message
     if not message or not message.text:
@@ -1910,9 +2312,33 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     init_database()
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise RuntimeError(".env 파일에 TELEGRAM_BOT_TOKEN을 설정해 주세요.")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not is_valid_telegram_bot_token(token):
+        raise RuntimeError(".env 파일에 유효한 TELEGRAM_BOT_TOKEN을 설정해 주세요.")
+    if not is_bot_token_rotation_confirmed():
+        raise RuntimeError(
+            "과거 노출 토큰을 BotFather에서 폐기하고 새 토큰으로 교체한 뒤 "
+            "BOT_TOKEN_ROTATION_CONFIRMED=true로 설정해 주세요."
+        )
+    if not configured_admin_ids():
+        raise RuntimeError(
+            "관리자 lockout 방지를 위해 .env의 ADMIN_USER_IDS에 "
+            "하나 이상의 비상 관리자 ID를 설정해 주세요."
+        )
+    if min(
+        REQUEST_LIMIT_COUNT,
+        REQUEST_LIMIT_WINDOW_SECONDS,
+        AUTH_FAILURE_LIMIT,
+        AUTH_FAILURE_WINDOW_SECONDS,
+        AUTH_BLOCK_SECONDS,
+    ) <= 0:
+        raise RuntimeError("요청 및 인증 제한 환경변수는 모두 1 이상의 정수여야 합니다.")
+    member_access_token = configured_member_access_token()
+    if not is_valid_member_access_token(member_access_token):
+        raise RuntimeError(
+            ".env 파일의 MEMBER_ACCESS_TOKEN을 영문, 숫자, _, -로 구성된 "
+            "32~64자 무작위 문자열로 설정해 주세요."
+        )
 
     if sys.version_info >= (3, 14):
         try:
@@ -1931,6 +2357,14 @@ def main() -> None:
         .get_updates_read_timeout(30)
         .build()
     )
+    app.add_handler(
+        ChatMemberHandler(reject_non_private, ChatMemberHandler.MY_CHAT_MEMBER),
+        group=-1,
+    )
+    app.add_handler(
+        MessageHandler(~filters.ChatType.PRIVATE, reject_non_private),
+        group=-1,
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("status", status_command))
@@ -1939,6 +2373,8 @@ def main() -> None:
     app.add_handler(CommandHandler("admin_status", admin_status_command))
     app.add_handler(CommandHandler("admin_errors", admin_errors_command))
     app.add_handler(CommandHandler("admin_reset_errors", admin_reset_errors_command))
+    app.add_handler(CommandHandler("admin_add", admin_add_command))
+    app.add_handler(CommandHandler("admin_remove", admin_remove_command))
     app.add_handler(CommandHandler("remind_on", remind_on))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CallbackQueryHandler(handle_button))

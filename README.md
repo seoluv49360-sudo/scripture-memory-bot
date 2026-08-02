@@ -27,6 +27,11 @@ pip install -r requirements.txt
 1. 텔레그램에서 `@BotFather` 를 열고 `/newbot` 으로 봇을 만듭니다.
 2. 발급받은 토큰을 `.env` 파일에 넣습니다.
 
+과거에 토큰이 Git, 채팅, 화면 캡처 등에 노출된 적이 있다면 BotFather의
+`/revoke`로 기존 토큰을 먼저 폐기하고 새 토큰을 발급받아야 합니다. 새 토큰을
+적용한 뒤에만 `BOT_TOKEN_ROTATION_CONFIRMED=true`로 설정하세요. 봇은 이 확인값과
+토큰 형식을 모두 검사하고, 조건이 맞지 않으면 시작하지 않습니다.
+
 ```bash
 copy .env.example .env
 ```
@@ -35,7 +40,15 @@ copy .env.example .env
 
 ```env
 TELEGRAM_BOT_TOKEN=발급받은_토큰
+BOT_TOKEN_ROTATION_CONFIRMED=true
+MEMBER_ACCESS_TOKEN=충분히_길고_무작위인_초대_토큰
 ADMIN_USER_IDS=관리자_텔레그램_ID
+SCRIPTURES_FILE=data/scriptures.json
+REQUEST_LIMIT_COUNT=12
+REQUEST_LIMIT_WINDOW_SECONDS=10
+AUTH_FAILURE_LIMIT=5
+AUTH_FAILURE_WINDOW_SECONDS=900
+AUTH_BLOCK_SECONDS=1800
 QUIZ_STATE_TTL_DAYS=3
 ERROR_LOG_TTL_DAYS=14
 TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS=3600
@@ -47,7 +60,13 @@ TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS=3600
 python bot.py
 ```
 
-텔레그램에서 만든 봇에게 `/start` 를 보내면 성구 선택 버튼이 표시됩니다.
+관리자는 아래 형식의 deep-link 초대 링크를 사용자에게 전달합니다.
+
+```text
+https://t.me/내봇사용자이름?start=MEMBER_ACCESS_TOKEN값
+```
+
+사용자가 링크를 처음 누르면 승인 멤버로 등록됩니다. 이후에는 일반 `/start` 명령으로도 이용할 수 있습니다. `.env`의 `ADMIN_USER_IDS`에 등록된 관리자는 초대 링크 없이 접속할 수 있습니다.
 
 ## Docker로 실행
 
@@ -63,16 +82,26 @@ cp .env.example .env
 
 ```env
 TELEGRAM_BOT_TOKEN=발급받은_토큰
+BOT_TOKEN_ROTATION_CONFIRMED=true
+MEMBER_ACCESS_TOKEN=충분히_길고_무작위인_초대_토큰
 ADMIN_USER_IDS=관리자_텔레그램_ID
+SCRIPTURES_FILE=data/scriptures.json
+REQUEST_LIMIT_COUNT=12
+REQUEST_LIMIT_WINDOW_SECONDS=10
+AUTH_FAILURE_LIMIT=5
+AUTH_FAILURE_WINDOW_SECONDS=900
+AUTH_BLOCK_SECONDS=1800
 QUIZ_STATE_TTL_DAYS=3
 ERROR_LOG_TTL_DAYS=14
 TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS=3600
 ```
 
-데이터 저장 폴더를 만들고 실행합니다.
+데이터 저장 폴더를 만들고 예제 본문 파일을 복사한 뒤, 사용 권한이 있는 실제
+본문과 라벨을 `data/scriptures.json`에 입력합니다.
 
 ```bash
 mkdir data
+cp scriptures.example.json data/scriptures.json
 docker compose up -d --build
 ```
 
@@ -104,9 +133,26 @@ docker compose down
 /admin_status
 /admin_errors
 /admin_reset_errors
+/admin_add 텔레그램사용자ID
+/admin_remove 텔레그램사용자ID
 ```
 
-관리자 명령어는 `.env`의 `ADMIN_USER_IDS`에 등록된 텔레그램 사용자 ID만 사용할 수 있습니다. 여러 명을 등록하려면 쉼표로 구분합니다.
+관리자 명령어는 관리자만 사용할 수 있습니다. `.env`의 `ADMIN_USER_IDS`는 서버
+복구용 비상 관리자이며 실행 시 DB 관리자 목록에도 반영됩니다. 여러 명을
+등록하려면 쉼표로 구분합니다. 비상 관리자, 현재 명령을 실행 중인 관리자,
+마지막 남은 관리자는 제거할 수 없어 관리자 lockout을 방지합니다.
+
+봇은 개인 채팅에서만 동작하며 그룹이나 슈퍼그룹에 추가되면 해당 채팅을
+처리하지 않고 나갑니다. 사용자별 짧은 시간의 요청 횟수와 잘못된 초대 토큰
+시도 횟수도 제한됩니다.
+
+`MEMBER_ACCESS_TOKEN`은 비밀번호 생성기로 만든 긴 무작위 문자열을 사용하세요. 실제 값은 `.env`에만 넣고 Git이나 채팅에 공개하지 마세요. 토큰을 변경해도 이미 승인된 사용자는 계속 이용할 수 있으며, 새 사용자는 새 초대 링크를 사용해야 합니다.
+
+PowerShell에서는 다음 명령으로 안전한 형식의 토큰을 만들 수 있습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
 모의고사:
 
@@ -137,7 +183,22 @@ docker compose down
 
 ## 성구 수정
 
-성구 목록은 `scriptures.py` 에 있습니다. 현재 항목은 요청한 요한계시록 5개 구절로 맞춰져 있습니다.
+실제 본문과 표시 라벨은 Git에서 제외되는 `data/scriptures.json`에 저장합니다.
+저장소에는 구조만 보여 주는 `scriptures.example.json`만 포함됩니다.
+
+PowerShell에서는 다음 명령으로 운영 파일을 만들 수 있습니다.
+
+```powershell
+New-Item -ItemType Directory -Force data
+Copy-Item scriptures.example.json data\scriptures.json
+notepad data\scriptures.json
+```
+
+개역한글 본문처럼 공개하기 곤란하거나 사용 조건이 있는 데이터는
+`data/scriptures.json`에만 입력하고 커밋하지 마세요. 과거 Git 커밋에 실제 토큰이나
+본문이 포함된 적이 있다면 현재 파일 삭제만으로 기록이 사라지지 않습니다. 토큰은
+반드시 폐기·재발급하고, 저장소 공개 전에는 별도로 Git 기록 정리 여부를 검토해야
+합니다.
 
 개역한글 본문은 저작권이 있는 번역본이므로, 사용 권한이 있는 본문을 `text` 값에 직접 붙여 넣어 사용하세요.
 

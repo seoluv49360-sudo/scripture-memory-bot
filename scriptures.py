@@ -1,30 +1,42 @@
-SCRIPTURES = [
-    {
-        "id": "rev_1_1_3",
-        "reference": "요한계시록 1:1-3",
-        "text": "1 예수 그리스도의 계시라 이는 하나님이 그에게 주사 반드시 속히 될 일을 그 종들에게 보이시려고 그 천사를 그 종 요한에게 보내어 지시하신 것이라 2 요한은 하나님의 말씀과 예수 그리스도의 증거 곧 자기의 본 것을 다 증거하였느니라 3 이 예언의 말씀을 읽는 자와 듣는 자들과 그 가운데 기록한 것을 지키는 자들이 복이 있나니 때가 가까움이라",
-    },
-    {
-        "id": "rev_7_1_4",
-        "reference": "요한계시록 7:1-4",
-        "text": "1 이 일 후에 내가 네 천사가 땅 네 모퉁이에 선 것을 보니 땅의 사방의 바람을 붙잡아 바람으로 하여금 땅에나 바다에나 각종 나무에 불지 못하게 하더라 2 또 보매 다른 천사가 살아 계신 하나님의 인을 가지고 해돋는 데로부터 올라와서 땅과 바다를 해롭게 할 권세를 얻은 네 천사를 향하여 큰 소리로 외쳐 3 가로되 우리가 우리 하나님의 종들의 이마에 인치기까지 땅이나 바다나 나무나 해하지 말라 하더라 4 내가 인 맞은 자의 수를 들으니 이스라엘 자손의 각 지파 중에서 인 맞은 자들이 십사만 사천이니",
-    },
-    {
-        "id": "rev_10_10_11",
-        "reference": "요한계시록 10:10-11",
-        "text": "10 내가 천사의 손에서 작은 책을 갖다 먹어 버리니 내 입에는 꿀같이 다나 먹은 후에 내 배에서는 쓰게 되더라 11 저가 내게 말하기를 네가 많은 백성과 나라와 방언과 임금에게 다시 예언하여야 하리라 하더라",
-    },
-    {
-        "id": "rev_20_4_6",
-        "reference": "요한계시록 20:4-6",
-        "text": "4 또 내가 보좌들을 보니 거기 앉은 자들이 있어 심판하는 권세를 받았더라 또 내가 보니 예수의 증거와 하나님의 말씀을 인하여 목 베임을 받은 자의 영혼들과 또 짐승과 그의 우상에게 경배하지도 아니하고 이마와 손에 그의 표를 받지도 아니한 자들이 살아서 그리스도로 더불어 천 년 동안 왕 노릇 하니 5 （그 나머지 죽은 자들은 그 천 년이 차기까지 살지 못하더라）이는 첫째 부활이라 6 이 첫째 부활에 참예하는 자들은 복이 있고 거룩하도다 둘째 사망이 그들을 다스리는 권세가 없고 도리어 그들이 하나님과 그리스도의 제사장이 되어 천 년 동안 그리스도로 더불어 왕 노릇 하리라",
-    },
-    {
-        "id": "rev_22_18_19",
-        "reference": "요한계시록 22:18-19",
-        "text": "18 내가 이 책의 예언의 말씀을 듣는 각인에게 증거하노니 만일 누구든지 이것들 외에 더하면 하나님이 이 책에 기록된 재앙들을 그에게 더하실 터이요 19 만일 누구든지 이 책의 예언의 말씀에서 제하여 버리면 하나님이 이 책에 기록된 생명나무와 및 거룩한 성에 참예함을 제하여 버리시리라",
-    },
-]
+import json
+import os
+from pathlib import Path
 
 
+SCRIPTURES_FILE = Path(os.getenv("SCRIPTURES_FILE", "data/scriptures.json"))
+
+
+def load_scriptures(path: Path = SCRIPTURES_FILE) -> list[dict[str, str]]:
+    if not path.is_file():
+        raise RuntimeError(
+            f"본문 데이터 파일이 없습니다: {path}. "
+            "scriptures.example.json을 복사해 운영 데이터를 입력해 주세요."
+        )
+    try:
+        raw_data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"본문 데이터 파일을 읽을 수 없습니다: {path}") from error
+    if not isinstance(raw_data, list) or not raw_data:
+        raise RuntimeError("본문 데이터는 하나 이상의 항목이 있는 JSON 배열이어야 합니다.")
+
+    scriptures: list[dict[str, str]] = []
+    scripture_ids: set[str] = set()
+    for item in raw_data:
+        if not isinstance(item, dict):
+            raise RuntimeError("본문 데이터의 각 항목은 JSON 객체여야 합니다.")
+        scripture = {
+            "id": str(item.get("id", "")).strip(),
+            "reference": str(item.get("reference", "")).strip(),
+            "text": str(item.get("text", "")).strip(),
+        }
+        if not all(scripture.values()):
+            raise RuntimeError("본문 데이터의 id, reference, text 값은 비어 있을 수 없습니다.")
+        if scripture["id"] in scripture_ids:
+            raise RuntimeError(f"중복된 본문 id가 있습니다: {scripture['id']}")
+        scripture_ids.add(scripture["id"])
+        scriptures.append(scripture)
+    return scriptures
+
+
+SCRIPTURES = load_scriptures()
 SCRIPTURE_BY_ID = {scripture["id"]: scripture for scripture in SCRIPTURES}
