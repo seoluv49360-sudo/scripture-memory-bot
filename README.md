@@ -132,7 +132,9 @@ docker compose down
 
 ```text
 /admin_status
+/errors
 /admin_errors
+/reset_errors
 /admin_reset_errors
 /admin_add 텔레그램사용자ID
 /admin_remove 텔레그램사용자ID
