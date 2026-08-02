@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -53,6 +54,15 @@ class SecurityControlTests(unittest.TestCase):
         self.assertTrue(bot.is_valid_pick_selection(quiz, 0, 77))
         self.assertFalse(bot.is_valid_pick_selection(quiz, 1, 77))
         self.assertFalse(bot.is_valid_pick_selection(quiz, 0, 78))
+
+    def test_blank_quiz_avoids_weak_phrase_starts(self) -> None:
+        text = "13 귀 있는 자는 성령이 교회들에게 하시는 말씀을 들을찌어다"
+        random.seed(1)
+        _, answers, _, _, _ = bot.make_blank_quiz(text, "hard")
+        self.assertTrue(answers)
+        self.assertFalse(any(answer.startswith("자는 ") for answer in answers))
+        self.assertNotIn("하시는", answers)
+        self.assertNotIn("easy", bot.DIFFICULTIES)
 
     def test_approved_member_is_persisted(self) -> None:
         self.assertFalse(bot.is_approved_member(12345))

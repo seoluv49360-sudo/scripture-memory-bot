@@ -63,7 +63,6 @@ except Exception:
 REMINDER_TIME = time(hour=8, minute=0, tzinfo=KST)
 
 DIFFICULTIES = {
-    "easy": {"label": "하", "ratio": 0.12, "max_blanks": 4, "hint": "가볍게 확인", "subjective": False},
     "medium": {"label": "중", "ratio": 0.2, "max_blanks": 7, "hint": "암송 점검", "subjective": False},
     "hard": {"label": "상", "ratio": 0.3, "max_blanks": 10, "hint": "실전 훈련", "subjective": False},
     "expert": {"label": "최상", "ratio": 0.2, "max_blanks": 7, "hint": "주관식 도전", "subjective": True},
@@ -1037,7 +1036,6 @@ def difficulty_keyboard(scripture_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🟢 하", callback_data=f"blank:easy:{scripture_id}"),
                 InlineKeyboardButton("🟡 중", callback_data=f"blank:medium:{scripture_id}"),
                 InlineKeyboardButton("🔴 상", callback_data=f"blank:hard:{scripture_id}"),
             ],
@@ -1070,7 +1068,7 @@ def blank_result_keyboard(scripture_id: str, difficulty: str) -> InlineKeyboardM
 
 
 def blank_choice_keyboard(quiz: QuizState) -> InlineKeyboardMarkup:
-    if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
+    if DIFFICULTIES.get(quiz.difficulty or "medium", {}).get("subjective"):
         rows = []
         if len(quiz.typed_answers) >= len(quiz.answers):
             rows.append([InlineKeyboardButton("✅ 채점하기", callback_data="blank_subjective_submit")])
@@ -1105,7 +1103,7 @@ def blank_choice_keyboard(quiz: QuizState) -> InlineKeyboardMarkup:
 
 
 def blank_answer_for_slot(quiz: QuizState, slot_index: int) -> str | None:
-    if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
+    if DIFFICULTIES.get(quiz.difficulty or "medium", {}).get("subjective"):
         if slot_index >= len(quiz.typed_answers):
             return None
         return quiz.typed_answers[slot_index]
@@ -1142,7 +1140,7 @@ def render_blank_text(quiz: QuizState) -> str:
 
 
 def blank_prompt_text(scripture: dict[str, str], quiz: QuizState) -> str:
-    difficulty = DIFFICULTIES[quiz.difficulty or "easy"]
+    difficulty = DIFFICULTIES[quiz.difficulty or "medium"]
     total = len(quiz.answers)
     if difficulty.get("subjective"):
         filled_count = len(quiz.typed_answers)
@@ -1503,6 +1501,8 @@ PARTICLE_SUFFIXES = (
     "에게",
     "께서",
     "으로",
+    "은",
+    "는",
     "이",
     "가",
     "을",
@@ -1547,6 +1547,8 @@ STANDALONE_BLANK_STOPWORDS = {
 
 PHRASE_PREFIX_STOPWORDS = {"곧", "이는", "또", "및", "그", "그이", "내", "나의", "네가", "저가"}
 PHRASE_STEM_STOPWORDS = {"그", "내", "나", "네", "저", "이"}
+WEAK_PHRASE_STARTS = {"자", "자는", "자와", "자들", "자들이", "자들을", "자에게", "각인", "누구든지"}
+WEAK_BLANK_STEMS = {"하시", "하는", "하시는", "되게", "되는", "있는", "있어"}
 CLAUSE_ENDINGS = ("더라", "니라", "리라", "도다", "으매", "하니", "리니", "라", "니", "며", "매", "고", "되", "요")
 
 
@@ -1560,6 +1562,15 @@ def is_phrase_prefix_stopword(word: str) -> bool:
 
 def is_phrase_stem_stopword(word: str) -> bool:
     return normalize(word) in PHRASE_STEM_STOPWORDS
+
+
+def is_weak_phrase_start(word: str) -> bool:
+    return normalize(word) in WEAK_PHRASE_STARTS
+
+
+def is_weak_blank_stem(word: str) -> bool:
+    stem, _ = split_particle(word)
+    return normalize(stem) in WEAK_BLANK_STEMS
 
 
 def split_particle(word: str) -> tuple[str, str]:
@@ -1584,8 +1595,30 @@ def is_blankable_word(word: str) -> bool:
         return False
     if is_standalone_stopword(word):
         return False
+    if is_weak_blank_stem(word):
+        return False
     stem, suffix = split_particle(word)
     return not suffix and len(normalize(stem)) >= 2
+
+
+def meaningful_word_count(answer_words: list[str]) -> int:
+    count = 0
+    for word in answer_words:
+        stem, _ = split_particle(word)
+        normalized = normalize(stem)
+        if len(normalized) < 2:
+            continue
+        if is_numeric_token(word) or is_number_word(word):
+            continue
+        if (
+            is_standalone_stopword(word)
+            or is_phrase_prefix_stopword(word)
+            or is_weak_phrase_start(word)
+            or is_weak_blank_stem(word)
+        ):
+            continue
+        count += 1
+    return count
 
 
 def phrase_start_for_complete_unit(words: list[str], index: int, stem: str) -> int | None:
@@ -1603,6 +1636,8 @@ def phrase_start_for_complete_unit(words: list[str], index: int, stem: str) -> i
     if start >= index:
         return index if len(normalize(stem)) >= 2 else None
     if is_phrase_prefix_stopword(words[start]):
+        return index if len(normalize(stem)) >= 2 else None
+    if is_weak_phrase_start(words[start]):
         return index if len(normalize(stem)) >= 2 else None
     if normalize(words[start]).endswith(CLAUSE_ENDINGS):
         return index if len(normalize(stem)) >= 2 else None
@@ -1624,6 +1659,7 @@ def make_candidate(
     priority: int,
 ) -> dict:
     answer = " ".join(answer_words)
+    importance = meaningful_word_count(answer_words)
     return {
         "start": start,
         "end": end,
@@ -1631,6 +1667,7 @@ def make_candidate(
         "suffix": suffix,
         "kind": kind,
         "priority": priority,
+        "importance": importance,
     }
 
 
@@ -1714,8 +1751,9 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
                 make_candidate(words, index, index + 1, [word], "", "word", 2)
             )
 
+    candidates = [candidate for candidate in candidates if candidate["importance"] > 0]
     random.shuffle(candidates)
-    candidates.sort(key=lambda candidate: candidate["priority"])
+    candidates.sort(key=lambda candidate: (candidate["priority"], -candidate["importance"]))
     selected_units = []
     used_indexes = set()
     subjective_mode = bool(difficulty_info.get("subjective"))
@@ -1725,14 +1763,14 @@ def make_blank_quiz(text: str, difficulty: str) -> tuple[str, list[str], list[st
         indexes = set(range(candidate["start"], candidate["end"]))
         if indexes & used_indexes:
             continue
-        if subjective_mode:
-            touches_existing_blank = any(
-                candidate["start"] <= unit["end"] + SUBJECTIVE_MIN_GAP_WORDS
-                and unit["start"] <= candidate["end"] + SUBJECTIVE_MIN_GAP_WORDS
-                for unit in selected_units
-            )
-            if touches_existing_blank:
-                continue
+        min_gap_words = SUBJECTIVE_MIN_GAP_WORDS if subjective_mode else 1
+        touches_existing_blank = any(
+            candidate["start"] <= unit["end"] + min_gap_words
+            and unit["start"] <= candidate["end"] + min_gap_words
+            for unit in selected_units
+        )
+        if touches_existing_blank:
+            continue
         selected_units.append(candidate)
         used_indexes.update(indexes)
         if len(selected_units) >= blank_count:
@@ -1825,7 +1863,7 @@ async def finish_blank_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     clear_quiz(update, context)
     await query.edit_message_text(
         blank_result_message(correct_count, total, result_lines),
-        reply_markup=blank_result_keyboard(quiz.scripture_id, quiz.difficulty or "easy"),
+        reply_markup=blank_result_keyboard(quiz.scripture_id, quiz.difficulty or "medium"),
     )
 
 
@@ -1947,7 +1985,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
+        if DIFFICULTIES.get(quiz.difficulty or "medium", {}).get("subjective"):
             quiz.typed_answers.clear()
             set_quiz(update, context, quiz)
             await query.edit_message_text(
@@ -2140,7 +2178,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(
             f"🧩 {scripture['reference']} 빈칸 넣기\n\n"
             "난이도를 선택하세요.\n\n"
-            "🟢 하: 적은 빈칸\n"
             "🟡 중: 적당한 빈칸\n"
             "🔴 상: 많은 빈칸\n"
             "⚫ 최상: 직접 입력",
@@ -2150,6 +2187,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if data.startswith("blank:"):
         _, difficulty, scripture_id = data.split(":")
+        if difficulty == "easy":
+            difficulty = "medium"
+        if difficulty not in DIFFICULTIES:
+            difficulty = "medium"
         if scripture_id not in SCRIPTURE_BY_ID:
             clear_quiz(update, context)
             await show_scripture_scope_changed(query)
@@ -2236,7 +2277,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if quiz.mode == MODE_BLANK:
-        if DIFFICULTIES.get(quiz.difficulty or "easy", {}).get("subjective"):
+        if DIFFICULTIES.get(quiz.difficulty or "medium", {}).get("subjective"):
             if len(quiz.typed_answers) < len(quiz.answers):
                 quiz.typed_answers.append(submitted.strip())
                 set_quiz(update, context, quiz)
