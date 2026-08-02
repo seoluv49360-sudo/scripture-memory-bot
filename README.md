@@ -41,7 +41,7 @@ copy .env.example .env
 ```env
 TELEGRAM_BOT_TOKEN=발급받은_토큰
 BOT_TOKEN_ROTATION_CONFIRMED=true
-MEMBER_ACCESS_TOKEN=충분히_길고_무작위인_초대_토큰
+MEMBER_ACCESS_TOKEN=
 ADMIN_USER_IDS=관리자_텔레그램_ID
 SCRIPTURES_FILE=data/scriptures.json
 REQUEST_LIMIT_COUNT=12
@@ -60,13 +60,14 @@ TRANSIENT_NETWORK_ERROR_LOG_INTERVAL_SECONDS=3600
 python bot.py
 ```
 
-관리자는 아래 형식의 deep-link 초대 링크를 사용자에게 전달합니다.
+`MEMBER_ACCESS_TOKEN`은 선택 설정입니다. 값을 비워 두면 별도 승인 없이 개인 채팅에서 `/start`로 바로 이용할 수 있습니다.
+초대 링크로 사용자 승인을 제한하고 싶을 때만 32~64자의 무작위 토큰을 넣고, 아래 형식의 deep-link 초대 링크를 전달합니다.
 
 ```text
 https://t.me/내봇사용자이름?start=MEMBER_ACCESS_TOKEN값
 ```
 
-사용자가 링크를 처음 누르면 승인 멤버로 등록됩니다. 이후에는 일반 `/start` 명령으로도 이용할 수 있습니다. `.env`의 `ADMIN_USER_IDS`에 등록된 관리자는 초대 링크 없이 접속할 수 있습니다.
+토큰을 설정한 경우 사용자가 링크를 처음 누르면 승인 멤버로 등록됩니다. 이후에는 일반 `/start` 명령으로도 이용할 수 있습니다. `.env`의 `ADMIN_USER_IDS`에 등록된 관리자는 초대 링크 없이 접속할 수 있습니다.
 
 ## Docker로 실행
 
@@ -83,7 +84,7 @@ cp .env.example .env
 ```env
 TELEGRAM_BOT_TOKEN=발급받은_토큰
 BOT_TOKEN_ROTATION_CONFIRMED=true
-MEMBER_ACCESS_TOKEN=충분히_길고_무작위인_초대_토큰
+MEMBER_ACCESS_TOKEN=
 ADMIN_USER_IDS=관리자_텔레그램_ID
 SCRIPTURES_FILE=data/scriptures.json
 REQUEST_LIMIT_COUNT=12
@@ -146,7 +147,7 @@ docker compose down
 처리하지 않고 나갑니다. 사용자별 짧은 시간의 요청 횟수와 잘못된 초대 토큰
 시도 횟수도 제한됩니다.
 
-`MEMBER_ACCESS_TOKEN`은 비밀번호 생성기로 만든 긴 무작위 문자열을 사용하세요. 실제 값은 `.env`에만 넣고 Git이나 채팅에 공개하지 마세요. 토큰을 변경해도 이미 승인된 사용자는 계속 이용할 수 있으며, 새 사용자는 새 초대 링크를 사용해야 합니다.
+`MEMBER_ACCESS_TOKEN`은 선택값입니다. 비워 두면 초대 승인 기능이 꺼지고, 값을 넣으면 승인된 사용자만 이용할 수 있습니다. 사용할 경우 비밀번호 생성기로 만든 긴 무작위 문자열을 사용하세요. 실제 값은 `.env`에만 넣고 Git이나 채팅에 공개하지 마세요. 토큰을 변경해도 이미 승인된 사용자는 계속 이용할 수 있으며, 새 사용자는 새 초대 링크를 사용해야 합니다.
 
 PowerShell에서는 다음 명령으로 안전한 형식의 토큰을 만들 수 있습니다.
 

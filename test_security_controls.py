@@ -25,10 +25,16 @@ class SecurityControlTests(unittest.TestCase):
     def test_member_access_payload_uses_configured_token(self) -> None:
         token = "a" * 32
         with patch.dict(os.environ, {"MEMBER_ACCESS_TOKEN": token}, clear=False):
+            self.assertTrue(bot.member_access_required())
             self.assertTrue(bot.member_access_payload_matches(token))
             self.assertFalse(bot.member_access_payload_matches("wrong-token"))
             self.assertFalse(bot.member_access_payload_matches(""))
             self.assertTrue(bot.is_valid_member_access_token(token))
+
+    def test_member_access_token_can_be_blank(self) -> None:
+        with patch.dict(os.environ, {"MEMBER_ACCESS_TOKEN": ""}, clear=False):
+            self.assertFalse(bot.member_access_required())
+            self.assertFalse(bot.member_access_payload_matches(""))
 
     def test_bot_token_requires_valid_format_and_rotation_confirmation(self) -> None:
         self.assertTrue(bot.is_valid_telegram_bot_token("123456789:" + "a" * 35))

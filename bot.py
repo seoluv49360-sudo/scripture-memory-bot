@@ -359,6 +359,10 @@ def is_valid_member_access_token(token: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_-]{32,64}", token))
 
 
+def member_access_required() -> bool:
+    return bool(configured_member_access_token())
+
+
 def is_admin_user(user_id: int | None) -> bool:
     if user_id is None:
         return False
@@ -522,6 +526,8 @@ async def require_member(update: Update) -> bool:
         return False
     if not await require_request_limit(update):
         return False
+    if not member_access_required():
+        return True
     user_id = update.effective_user.id if update.effective_user else None
     if is_approved_member(user_id):
         return True
@@ -1177,7 +1183,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     newly_approved = False
-    if not is_approved_member(update.effective_user.id):
+    if member_access_required() and not is_approved_member(update.effective_user.id):
         if auth_failure_is_blocked(update.effective_user.id):
             await update.effective_message.reply_text(
                 "⏳ 인증 시도가 잠시 제한되었습니다. 나중에 다시 시도해 주세요."
@@ -2334,7 +2340,7 @@ def main() -> None:
     ) <= 0:
         raise RuntimeError("요청 및 인증 제한 환경변수는 모두 1 이상의 정수여야 합니다.")
     member_access_token = configured_member_access_token()
-    if not is_valid_member_access_token(member_access_token):
+    if member_access_token and not is_valid_member_access_token(member_access_token):
         raise RuntimeError(
             ".env 파일의 MEMBER_ACCESS_TOKEN을 영문, 숫자, _, -로 구성된 "
             "32~64자 무작위 문자열로 설정해 주세요."
