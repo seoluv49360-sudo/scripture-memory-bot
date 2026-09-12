@@ -37,6 +37,7 @@ load_dotenv(override=False)
 
 MODE_FULL = "full"
 MODE_BLANK = "blank"
+MODE_INITIAL = "initial"
 MODE_MOCK = "mock"
 SCRIPTURE_PLACEHOLDER = "개역한글 본문을 여기에 입력해 주세요."
 REMINDER_FILE = Path("reminders.json")
@@ -836,6 +837,51 @@ def format_scripture_text(text: str, reference: str | None = None) -> str:
     return formatted
 
 
+HANGUL_INITIALS = (
+    "ㄱ",
+    "ㄲ",
+    "ㄴ",
+    "ㄷ",
+    "ㄸ",
+    "ㄹ",
+    "ㅁ",
+    "ㅂ",
+    "ㅃ",
+    "ㅅ",
+    "ㅆ",
+    "ㅇ",
+    "ㅈ",
+    "ㅉ",
+    "ㅊ",
+    "ㅋ",
+    "ㅌ",
+    "ㅍ",
+    "ㅎ",
+)
+
+
+def make_initial_hint(text: str, reference: str | None = None) -> str:
+    formatted = format_scripture_text(text, reference)
+    initials = []
+    for char in formatted:
+        code = ord(char)
+        if 0xAC00 <= code <= 0xD7A3:
+            initials.append(HANGUL_INITIALS[(code - 0xAC00) // 588])
+        else:
+            initials.append(char)
+    hinted = "".join(initials)
+    return "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in hinted.splitlines())
+
+
+def initial_prompt_text(scripture: dict[str, str]) -> str:
+    return (
+        f"🔤 {scripture['reference']} 초성 맞추기\n\n"
+        "초성을 보고 성구 전체를 입력해 주세요.\n"
+        "띄어쓰기, 문장부호, 절 번호는 조금 달라도 괜찮습니다.\n\n"
+        f"<code>{html.escape(make_initial_hint(scripture['text'], scripture['reference']))}</code>"
+    )
+
+
 def scripture_keyboard(chat_id: int | None = None) -> InlineKeyboardMarkup:
     rows = []
     current_row = []
@@ -1018,6 +1064,7 @@ def mode_keyboard(scripture_id: str) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("✍️ 전체 암기 시작", callback_data=f"mode:{MODE_FULL}:{scripture_id}")],
             [InlineKeyboardButton("🧩 빈칸 넣기", callback_data=f"mode:{MODE_BLANK}:{scripture_id}")],
+            [InlineKeyboardButton("🔤 초성 맞추기", callback_data=f"mode:{MODE_INITIAL}:{scripture_id}")],
             [InlineKeyboardButton("📖 다른 성구 선택", callback_data="menu")],
         ]
     )
@@ -1051,6 +1098,7 @@ def full_result_keyboard(scripture_id: str) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🔁 전체 암기 다시 도전", callback_data=f"mode:{MODE_FULL}:{scripture_id}")],
             [InlineKeyboardButton("🧩 빈칸으로 연습", callback_data=f"mode:{MODE_BLANK}:{scripture_id}")],
+            [InlineKeyboardButton("🔤 초성으로 연습", callback_data=f"mode:{MODE_INITIAL}:{scripture_id}")],
             [InlineKeyboardButton("📖 다른 성구 선택", callback_data="menu")],
         ]
     )
@@ -2175,6 +2223,20 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
+        if mode == MODE_INITIAL:
+            quiz = QuizState(
+                scripture_id=scripture_id,
+                mode=MODE_INITIAL,
+                answers=[scripture["text"]],
+            )
+            set_quiz(update, context, quiz)
+            await query.edit_message_text(
+                initial_prompt_text(scripture),
+                reply_markup=practice_back_keyboard(scripture_id),
+                parse_mode="HTML",
+            )
+            return
+
         await query.edit_message_text(
             f"🧩 {scripture['reference']} 빈칸 넣기\n\n"
             "난이도를 선택하세요.\n\n"
@@ -2330,8 +2392,10 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     clear_quiz(update, context)
     memory_diff = build_memory_diff(scripture["text"], submitted)
+    result_title = "🔤 초성 맞추기 결과" if quiz.mode == MODE_INITIAL else "✍️ 전체 암기 결과"
     await message.reply_text(
         f"{feedback_text}\n\n"
+        f"{result_title}\n"
         f"📊 점수: {score}점\n\n"
         f"🔎 내가 입력한 내용에서 틀린 부분 표시:\n{memory_diff}\n\n"
         f"📖 정답:\n{html.escape(format_scripture_text(scripture['text'], scripture['reference']))}",

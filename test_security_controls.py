@@ -64,6 +64,11 @@ class SecurityControlTests(unittest.TestCase):
         self.assertNotIn("하시는", answers)
         self.assertNotIn("easy", bot.DIFFICULTIES)
 
+    def test_initial_hint_keeps_verse_numbers_and_line_breaks(self) -> None:
+        text = "12 이기는 자는 내 하나님 성전에 기둥이 되게 하리니 13 귀 있는 자는 성령이"
+        hint = bot.make_initial_hint(text, "요한계시록 3:12-13")
+        self.assertEqual(hint, "12 ㅇㄱㄴ ㅈㄴ ㄴ ㅎㄴㄴ ㅅㅈㅇ ㄱㄷㅇ ㄷㄱ ㅎㄹㄴ\n13 ㄱ ㅇㄴ ㅈㄴ ㅅㄹㅇ")
+
     def test_approved_member_is_persisted(self) -> None:
         self.assertFalse(bot.is_approved_member(12345))
         bot.approve_member(12345)
