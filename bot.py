@@ -1094,14 +1094,19 @@ def difficulty_keyboard(scripture_id: str) -> InlineKeyboardMarkup:
 
 
 def full_result_keyboard(scripture_id: str, mode: str = MODE_FULL) -> InlineKeyboardMarkup:
-    retry_button = (
-        InlineKeyboardButton("🔁 초성으로 다시 도전", callback_data=f"mode:{MODE_INITIAL}:{scripture_id}")
-        if mode == MODE_INITIAL
-        else InlineKeyboardButton("🔁 전체 암기 다시 도전", callback_data=f"mode:{MODE_FULL}:{scripture_id}")
-    )
+    if mode == MODE_INITIAL:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔁 초성으로 다시 도전", callback_data=f"mode:{MODE_INITIAL}:{scripture_id}")],
+                [InlineKeyboardButton("✍️ 전체 암기 도전", callback_data=f"mode:{MODE_FULL}:{scripture_id}")],
+                [InlineKeyboardButton("🧩 빈칸으로 연습", callback_data=f"mode:{MODE_BLANK}:{scripture_id}")],
+                [InlineKeyboardButton("📖 다른 성구 선택", callback_data="menu")],
+            ]
+        )
+
     return InlineKeyboardMarkup(
         [
-            [retry_button],
+            [InlineKeyboardButton("🔁 전체 암기 다시 도전", callback_data=f"mode:{MODE_FULL}:{scripture_id}")],
             [InlineKeyboardButton("🧩 빈칸으로 연습", callback_data=f"mode:{MODE_BLANK}:{scripture_id}")],
             [InlineKeyboardButton("🔤 초성으로 연습", callback_data=f"mode:{MODE_INITIAL}:{scripture_id}")],
             [InlineKeyboardButton("📖 다른 성구 선택", callback_data="menu")],
